@@ -1,20 +1,20 @@
 import json
 
 
-def build_context(results, evidence, coverage, budget):
+def build_context(results, evidence, coverage, budget, header=None):
     """Never truncate a proof: retain complete per-result bundles within the budget."""
     kept_results, kept_evidence = [], []
     for result in results:
         refs = set(result["evidence_ids"])
         bundle = [e for e in evidence if e.id in refs]
-        candidate = {"results": kept_results + [result],
+        candidate = {**(header or {}), "results": kept_results + [result],
                      "evidence": [e.model_dump() for e in kept_evidence + bundle],
                      "coverage": coverage.model_dump()}
         if len(json.dumps(candidate, ensure_ascii=False)) > budget:
             break
         kept_results.append(result)
         kept_evidence.extend(bundle)
-    return {"results": kept_results, "evidence": [e.model_dump() for e in kept_evidence],
+    return {**(header or {}), "results": kept_results, "evidence": [e.model_dump() for e in kept_evidence],
             "coverage": coverage.model_dump()}, len(kept_results) < len(results)
 
 

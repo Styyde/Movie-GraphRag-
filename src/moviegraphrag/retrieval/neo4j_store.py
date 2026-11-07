@@ -1,6 +1,6 @@
 import json
 
-from neo4j import GraphDatabase, Query
+from neo4j import GraphDatabase, unit_of_work
 
 from moviegraphrag.ingestion.dataset import normalize
 from moviegraphrag.retrieval.compiler import ID_PROPERTIES, compile_graph
@@ -30,15 +30,18 @@ class Neo4jStore:
         self.settings = settings
         self.driver = GraphDatabase.driver(settings.neo4j_uri,
                                             auth=(settings.neo4j_user,
-                                                  settings.neo4j_password.get_secret_value()))
+                                                  settings.neo4j_password.get_secret_value()),
+                                            connection_timeout=5, max_transaction_retry_time=2)
 
     def close(self):
         self.driver.close()
 
     def read(self, query: str, parameters: dict | None = None) -> list[dict]:
         with self.driver.session(database=self.settings.neo4j_database) as session:
-            return session.execute_read(lambda tx: [r.data() for r in tx.run(
-                Query(query, timeout=self.settings.query_timeout), parameters or {})])
+            @unit_of_work(timeout=self.settings.query_timeout)
+            def work(tx):
+                return [r.data() for r in tx.run(query, parameters or {})]
+            return session.execute_read(work)
 
     def write(self, query: str, parameters: dict | None = None):
         with self.driver.session(database=self.settings.neo4j_database) as session:

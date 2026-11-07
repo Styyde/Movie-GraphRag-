@@ -56,3 +56,11 @@ Les résultats structurés ne sont pas tronqués quand le contexte de synthèse 
 
 V2 : ingestion incrémentale, alias enrichis, motifs supplémentaires, benchmark des
 stratégies vector-first/parallèles et reranker seulement si un gain est démontré.
+
+## validation réelle dans docker
+
+Les tests accèdent au serveur Neo4j, au modèle E5 et à l'API HTTP réellement exécutés
+dans les conteneurs. Le sous-ensemble `llm` appelle réellement Mistral ; aucune
+simulation ni réponse de remplacement n'est utilisée. Un garde-fou pytest interdit
+les exécutions sur l'hôte. La validation sans clé couvre le graphe, l'ingestion,
+les embeddings et les endpoints de données, mais ne valide pas l'analyse LLM.

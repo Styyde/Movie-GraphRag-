@@ -5,7 +5,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class StrictModel(BaseModel):
-    model_config = ConfigDict(extra="forbid", validate_assignment=True)
+    model_config = ConfigDict(extra="forbid", validate_assignment=True, allow_inf_nan=False)
 
 
 class Label(StrEnum):
@@ -89,7 +89,13 @@ class QuestionDraft(StrictModel):
                     raise ValueError("Invalid mention binding")
                 used_mentions.add(v.mention_ref)
         for m in self.mentions:
+            if m.role is not None and m.type != Label.PERSON:
+                raise ValueError("Only people have actor/director roles")
+            if m.year is not None and m.type != Label.MOVIE:
+                raise ValueError("Release years identify movies only")
             if m.context_movie_ref:
+                if m.type != Label.PERSON:
+                    raise ValueError("Explicit film context identifies people only")
                 if m.context_movie_ref not in ms or ms[m.context_movie_ref].type != Label.MOVIE:
                     raise ValueError("Context must refer to a movie mention")
                 used_mentions.add(m.context_movie_ref)
@@ -146,6 +152,15 @@ class QuestionDraft(StrictModel):
             raise ValueError("Empty question plan")
         if self.theme_request and expected != Label.MOVIE:
             raise ValueError("Semantic person retrieval is outside the MVP")
+        if self.theme_request and len(set(self.theme_request.themes)) != len(self.theme_request.themes):
+            raise ValueError("Duplicate requested themes")
+        for variable in vs:
+            for field in ("release_year", "vote_average", "vote_count"):
+                filters = [f for f in self.filters if f.variable == variable and f.field == field]
+                lower = max((f.value for f in filters if f.op in {"gte", "eq"}), default=-float("inf"))
+                upper = min((f.value for f in filters if f.op in {"lte", "eq"}), default=float("inf"))
+                if lower > upper:
+                    raise ValueError("Contradictory filters")
         return self
 
 

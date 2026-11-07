@@ -58,5 +58,7 @@ def compile_graph(plan: QuestionDraft, bindings: dict[str, int]) -> CompiledQuer
     for a, b in plan.distinct_movies:
         predicates.append(f"{aliases[a]}.movie_id <> {aliases[b]}.movie_id")
     signature = "+".join(sorted(e.relation.value for e in plan.edges)) or "node"
-    return CompiledQuery("MATCH " + ", ".join(patterns), " AND ".join(predicates), params,
+    # Separate MATCH clauses allow two logical witness variables to share the same film
+    # and relationship. One comma-separated MATCH imposes relationship uniqueness.
+    return CompiledQuery("MATCH " + " MATCH ".join(patterns), " AND ".join(predicates), params,
                          aliases[plan.target], aliases, f"tree-v1:{signature}")

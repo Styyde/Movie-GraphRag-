@@ -150,7 +150,9 @@ class MovieGraphRAG:
         coverage.returned = len(results)
         status = "ok" if results else ("no_match_in_dataset" if strategy == "GRAPH" or (
             strategy == "HYBRID_GRAPH_FIRST" and coverage.total_candidates == 0) else "insufficient_evidence")
-        context, truncated = build_context(results, evidence, coverage, self.settings.context_char_budget)
+        context, truncated = build_context(results, evidence, coverage, self.settings.context_char_budget,
+                                           {"question": request.question, "language": request.language,
+                                            "theme_request": plan.theme_request.model_dump() if plan.theme_request else None})
         if truncated:
             warnings.append("Contexte de synthèse limité ; les résultats structurés conservent toutes leurs preuves.")
         if results:

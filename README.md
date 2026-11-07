@@ -45,19 +45,11 @@ Les IDs doivent provenir des candidats proposés. Les jetons expirent après 30 
 et sont invalidés au redémarrage de l'API. Les questions graphe acceptent `offset` ;
 les recommandations sémantiques n'ont pas de pagination exhaustive.
 
-## exécution python locale
+## environnement docker
 
-Python 3.12 requis. Sous Windows :
-
-```powershell
-py -3.12 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -e '.[dev,embeddings]'
-.\.venv\Scripts\moviegraphrag.exe profile --output data/reports/profile.json
-.\.venv\Scripts\moviegraphrag.exe ingest --output data/reports/manifest.json
-.\.venv\Scripts\uvicorn.exe moviegraphrag.api.app:app --host 127.0.0.1 --port 8000
-```
-
-Neo4j doit être accessible aux coordonnées de `.env`. La famille Neo4j retenue est
+L'application et tous ses tests s'exécutent dans Docker. Aucun Python système n'est
+nécessaire. Le code source est monté en lecture seule pour le développement local ;
+redémarrer le service API après une modification de code. La famille Neo4j retenue est
 5.26 LTS ; Compose utilise explicitement `5.26.0-community`, à mettre à jour vers un
 correctif validé avant tout déploiement exposé. L'application ne fournit pas de
 frontière d'autorisation multiutilisateur et ne doit pas être publiée telle quelle.
@@ -86,31 +78,33 @@ effectivement répondu est consigné ; `latest` n'est pas une garantie de stabil
 
 ## vérification
 
-```powershell
-.\.venv\Scripts\python.exe -m pytest -q
-.\.venv\Scripts\python.exe -m ruff check src tests
-.\.venv\Scripts\moviegraphrag.exe reference --output data/reports/reference.json
-```
-
-Les tests dataset utilisent uniquement les CSV locaux et sont ignorés en leur absence.
-Les tests Neo4j sont opt-in : ils réingèrent le même snapshot, sans supprimer de données.
-Utiliser une instance dédiée, déjà ingérée :
+Les tests refusent de démarrer hors Docker. Aucune doublure de Neo4j, E5, HTTP ou
+Mistral n'est utilisée. Les CSV manquants, un corpus non chargé ou une clé absente
+sont des erreurs, sans remplacement par des données simulées.
 
 ```powershell
-$env:RUN_NEO4J_TESTS='1'
-.\.venv\Scripts\python.exe -m pytest tests/integration -q
+# Après l'ingestion : stockage, embeddings réels et HTTP réel, sans appels LLM.
+docker compose --profile test run --rm tests python -m pytest -q tests/real -m 'not llm'
+# Validation complète, avec appels réels et facturables à Mistral.
+docker compose --profile test run --rm tests
+# Analyse statique, également dans Docker.
+docker compose --profile test run --rm tests python -m ruff check src tests evaluation
+docker compose exec api moviegraphrag reference --output data/reports/reference.json
 ```
 
-Les tests HTTP utilisent des doublures déterministes : ils ne prouvent pas la qualité
-réelle de Mistral. Une clé valide est nécessaire pour la vérification de bout en bout.
+Le test d'idempotence réingère réellement le snapshot. Les vecteurs dont le hash,
+le modèle et la révision correspondent sont réutilisés. Les tests LLM nécessitent
+`MISTRAL_API_KEY` dans `.env` ; après modification de cette clé, recréer le service :
+`docker compose up -d --force-recreate api`. Le fichier `/app/requirements.lock`
+dans l'image consigne les versions effectivement installées.
 
 ## évaluation
 
 ```powershell
-python evaluation/build_cases.py
-moviegraphrag evaluate --system graph --split dev --output evaluation/reports/graph.json
-moviegraphrag evaluate --system vector --split dev --output evaluation/reports/vector.json
-moviegraphrag evaluate --system flat --split dev --output evaluation/reports/flat.json
+docker compose exec api python evaluation/build_cases.py
+docker compose exec api moviegraphrag evaluate --system graph --split dev --output evaluation/reports/graph.json
+docker compose exec api moviegraphrag evaluate --system vector --split dev --output evaluation/reports/vector.json
+docker compose exec api moviegraphrag evaluate --system flat --split dev --output evaluation/reports/flat.json
 ```
 
 Le jeu comprend 80 questions, réparties en quatre catégories. Les références

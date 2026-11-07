@@ -17,20 +17,45 @@ services:
       timeout: 5s
       retries: 30
   api:
+    image: moviegraphrag:local
     build: .
     env_file: .env
     environment:
       NEO4J_URI: bolt://neo4j:7687
       HF_HOME: /models
+      PYTHONPATH: /app/src
+      OMP_NUM_THREADS: "2"
+      MKL_NUM_THREADS: "2"
     ports:
       - "127.0.0.1:8000:8000"
     volumes:
+      - ./src:/app/src:ro
       - ./data:/app/data
       - ./evaluation:/app/evaluation
-      - model_cache:/models
+      - ./models:/models
     depends_on:
       neo4j:
         condition: service_healthy
+  tests:
+    profiles: [test]
+    image: moviegraphrag:local
+    env_file: .env
+    environment:
+      NEO4J_URI: bolt://neo4j:7687
+      API_BASE_URL: http://api:8000
+      HF_HOME: /models
+      PYTHONPATH: /app/src
+      OMP_NUM_THREADS: "2"
+      MKL_NUM_THREADS: "2"
+    volumes:
+      - ./src:/app/src:ro
+      - ./data:/app/data
+      - ./models:/models
+      - ./tests:/app/tests:ro
+      - ./evaluation:/app/evaluation
+    depends_on:
+      api:
+        condition: service_started
+    command: ["python", "-m", "pytest", "-q", "tests/real"]
 volumes:
   neo4j_data:
-  model_cache:

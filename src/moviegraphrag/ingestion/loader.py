@@ -1,9 +1,13 @@
 import importlib.metadata
 import json
+import logging
+import platform
 from dataclasses import asdict
 from datetime import datetime, timezone
 
 from moviegraphrag.ingestion.documents import build_document
+
+logger = logging.getLogger(__name__)
 
 
 def chunks(rows, size=500):
@@ -20,7 +24,9 @@ def ingest(dataset, store, embedder):
         raise ValueError("Unmanaged Movie nodes exist: use a fresh dedicated database")
     manifest = {**dataset.manifest, "status": "loading",
                 "created_at": datetime.now(timezone.utc).isoformat(), "document_variant": "enriched",
-                "dependencies": {n: importlib.metadata.version(n) for n in ("neo4j", "pydantic")}}
+                "python": platform.python_version(),
+                "dependencies": {n: importlib.metadata.version(n) for n in (
+                    "neo4j", "pydantic", "fastapi", "sentence-transformers", "transformers", "torch")}}
     def save():
         store.write("MERGE (c:Corpus {name:'tmdb'}) SET c.manifest=$manifest",
                     {"manifest": json.dumps(manifest)})
@@ -50,7 +56,17 @@ def ingest(dataset, store, embedder):
                                   max_tokens=metadata["max_tokens"], prefix=metadata["prefix"])
         if document:
             documents.append(document)
-    for batch in chunks(documents, 32):
+    existing = {r["id"]: r for r in store.read(
+        "MATCH (m:Movie) RETURN m.movie_id AS id, m.document_hash AS hash, "
+        "m.embedding_model AS model, m.embedding_revision AS revision, "
+        "m.document_version AS version, size(m.embedding) AS dimensions")}
+    pending = [d for d in documents if not (
+        (old := existing.get(d.movie_id)) and old["hash"] == d.text_hash
+        and old["model"] == metadata["model"] and old["revision"] == metadata["revision"]
+        and old["version"] == d.document_version and old["dimensions"] == metadata["dimensions"])]
+    logger.info("embedding documents=%s reused=%s pending=%s", len(documents),
+                len(documents) - len(pending), len(pending))
+    for i, batch in enumerate(chunks(pending, 32)):
         vectors = embedder.encode_passages([d.text for d in batch])
         rows = [{**asdict(d), "embedding": v} for d, v in zip(batch, vectors, strict=True)]
         store.write("UNWIND $rows AS row MATCH (m:Movie {movie_id:row.movie_id}) "
@@ -59,6 +75,8 @@ def ingest(dataset, store, embedder):
                     "m.document_version=row.document_version,m.text_coverage=row.coverage,"
                     "m.token_count=row.token_count,m.keywords_removed=row.keywords_removed",
                     {"rows": rows, "model": metadata["model"], "revision": metadata["revision"]})
+        if i % 8 == 0:
+            logger.info("encoded %s/%s pending documents", min((i + 1) * 32, len(pending)), len(pending))
     indexed_ids = {d.movie_id for d in documents}
     store.write("MATCH (m:Movie) WHERE NOT m.movie_id IN $ids REMOVE m.embedding, m.document_text, "
                 "m.document_hash, m.document_version, m.embedding_model, m.embedding_revision "
@@ -75,6 +93,7 @@ def ingest(dataset, store, embedder):
     if actual_embeddings != len(documents):
         raise ValueError("Embedding coverage mismatch")
     manifest.update(status="ready", embedded_documents=len(documents),
+                    reused_embeddings=len(documents) - len(pending),
                     metadata_only=sum(d.coverage == "metadata_only" for d in documents),
                     trimmed_documents=sum(d.keywords_removed > 0 for d in documents))
     save()

@@ -1,6 +1,7 @@
 import argparse
 import importlib.metadata
 import json
+import logging
 from pathlib import Path
 
 from moviegraphrag.config import Settings
@@ -11,6 +12,7 @@ from moviegraphrag.retrieval.neo4j_store import Neo4jStore
 
 
 def main():
+    logging.basicConfig(level=logging.INFO)
     parser = argparse.ArgumentParser(prog="moviegraphrag")
     sub = parser.add_subparsers(dest="command", required=True)
     for command in ("profile", "ingest", "reference"):

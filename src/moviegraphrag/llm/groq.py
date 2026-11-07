@@ -6,6 +6,7 @@ import httpx
 from pydantic import ValidationError
 
 from moviegraphrag.llm.prompts import ANALYZER, ASSESSOR, GENERATOR
+from moviegraphrag.examples import QUESTIONS, reference_plan
 from moviegraphrag.schemas.models import AssessmentBatch, GeneratedAnswer, QuestionDraft
 
 
@@ -26,28 +27,47 @@ class Usage:
                 "estimated_cost_usd": cost}
 
 
-class MistralLLM:
+def strict_schema(schema):
+    """Groq strict mode requires every property to be required, including nullable ones."""
+    if isinstance(schema, dict):
+        result = {k: strict_schema(v) for k, v in schema.items() if k != "default"}
+        if result.get("type") == "object":
+            result["additionalProperties"] = False
+            result["required"] = list(result.get("properties", {}))
+        if "prefixItems" in result:
+            # The only tuple is a pair of movie-variable refs; local validation enforces length.
+            result["items"] = result.pop("prefixItems")[0]
+        if "anyOf" in result and any(branch.get("type") == "number" for branch in result["anyOf"]):
+            # JSON Schema number already includes integers; Groq rejects the overlapping union.
+            result["anyOf"] = [branch for branch in result["anyOf"] if branch.get("type") != "integer"]
+        return result
+    if isinstance(schema, list):
+        return [strict_schema(v) for v in schema]
+    return schema
+
+
+class GroqLLM:
     def __init__(self, settings, client=None):
         self.settings = settings
-        self.client = client or httpx.Client(base_url="https://api.mistral.ai/v1", timeout=60)
+        self.client = client or httpx.Client(base_url="https://api.groq.com/openai/v1", timeout=60)
 
     def close(self):
         self.client.close()
 
     def structured(self, schema, system, payload, usage: Usage):
-        if not self.settings.mistral_api_key.get_secret_value():
-            raise RuntimeError("MISTRAL_API_KEY is not configured")
-        request = {"model": self.settings.mistral_model, "temperature": 0,
+        if not self.settings.groq_api_key.get_secret_value():
+            raise RuntimeError("GROQ_API_KEY is not configured")
+        request = {"model": self.settings.groq_model, "temperature": 0,
                    "max_tokens": 10000,
                    "messages": [{"role": "system", "content": system},
                                 {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}],
                    "response_format": {"type": "json_schema", "json_schema": {
-                       "name": schema.__name__, "schema": schema.model_json_schema(), "strict": True}}}
+                       "name": schema.__name__, "schema": strict_schema(schema.model_json_schema()), "strict": True}}}
         for attempt in range(3):
             usage.calls += 1
             try:
                 response = self.client.post("/chat/completions", json=request, headers={
-                    "Authorization": "Bearer " + self.settings.mistral_api_key.get_secret_value()})
+                    "Authorization": "Bearer " + self.settings.groq_api_key.get_secret_value()})
             except httpx.TransportError:
                 if attempt == 2:
                     raise
@@ -58,7 +78,7 @@ class MistralLLM:
                 continue
             response.raise_for_status()
             result = response.json()
-            usage.models.add(result.get("model", self.settings.mistral_model))
+            usage.models.add(result.get("model", self.settings.groq_model))
             counts = result.get("usage", {})
             usage.prompt_tokens += counts.get("prompt_tokens", 0)
             usage.completion_tokens += counts.get("completion_tokens", 0)
@@ -67,10 +87,14 @@ class MistralLLM:
 
     def analyze(self, question, usage):
         payload = {"question": question}
+        system = ANALYZER + "\nMANDATORY: variables MUST declare ALL edge endpoints and the target. " \
+            "Each mentioned entity must be bound using mention_ref. Never return an empty variables array.\n" \
+            + "\n".join("Worked example question: " + QUESTIONS[k] + "\nValid plan: " +
+                        reference_plan(k).model_dump_json() for k in ("Q1", "Q4", "Q9"))
         try:
-            return self.structured(QuestionDraft, ANALYZER, payload, usage)
+            return self.structured(QuestionDraft, system, payload, usage)
         except ValidationError as exc:
-            return self.structured(QuestionDraft, ANALYZER,
+            return self.structured(QuestionDraft, system,
                                    {**payload, "validation_errors": str(exc)[:4000],
                                     "instruction": "Correct the plan once; reject unsupported requests."}, usage)
 

@@ -61,7 +61,8 @@ class QuestionDraft(StrictModel):
     unsupported_reason: str | None = None
     answer_type: Literal["movie_list", "person_list"] = "movie_list"
     mentions: list[Mention] = Field(default_factory=list, max_length=8)
-    variables: list[Variable] = Field(default_factory=list, max_length=6)
+    variables: list[Variable] = Field(default_factory=list, max_length=6,
+        description="Declare every edge endpoint and the target, including every entity mention binding. Never empty for a supported plan.")
     edges: list[Edge] = Field(default_factory=list, max_length=4)
     target: str = "result"
     filters: list[Filter] = Field(default_factory=list, max_length=8)

@@ -13,7 +13,7 @@ def test_real_http_health_movie_and_validation(api):
     ("Quels films ont été réalisés par Christopher Nolan avec Cillian Murphy ?", {272, 155, 49026, 27205}),
     ("Quels réalisateurs ont travaillé avec Leonardo DiCaprio et Cillian Murphy ?", {525, 2034}),
 ])
-def test_real_mistral_analyzer_and_graph_api(api, mistral_configured, question, expected):
+def test_real_groq_analyzer_and_graph_api(api, groq_configured, question, expected):
     result = api.post("/questions", json={"question": question, "limit": 20}).json()
     assert result["status"] == "ok", result
     assert {r["id"] for r in result["results"]} == expected
@@ -22,7 +22,7 @@ def test_real_mistral_analyzer_and_graph_api(api, mistral_configured, question, 
 
 
 @pytest.mark.llm
-def test_real_mistral_hybrid_and_citations(api, mistral_configured):
+def test_real_groq_hybrid_and_citations(api, groq_configured):
     result = api.post("/questions", json={
         "question": "Quels films de Nolan avec DiCaprio parlent des rêves ?"}).json()
     assert result["status"] == "ok", result
@@ -38,7 +38,7 @@ def test_real_mistral_hybrid_and_citations(api, mistral_configured):
 
 
 @pytest.mark.llm
-def test_real_absent_entity_never_falls_back_to_vector(api, mistral_configured):
+def test_real_absent_entity_never_falls_back_to_vector(api, groq_configured):
     result = api.post("/questions", json={
         "question": "Quels films ont été réalisés par UnePersonneInexistanteXYZ ?"}).json()
     assert result["status"] == "entity_not_found", result

@@ -49,13 +49,13 @@ def metrics(ids, relevance, k=5, exhaustive=False):
 def evaluate(args, settings):
     from moviegraphrag.embeddings import LocalEmbedder
     from moviegraphrag.ingestion.dataset import load_dataset
-    from moviegraphrag.llm.mistral import MistralLLM
+    from moviegraphrag.llm.groq import GroqLLM
     from moviegraphrag.orchestration import MovieGraphRAG
     from moviegraphrag.retrieval.neo4j_store import Neo4jStore
     from moviegraphrag.schemas.models import QuestionRequest
     cases = [json.loads(line) for line in args.cases.read_text(encoding="utf-8").splitlines() if line.strip()]
     cases = [c for c in cases if c["split"] == args.split]
-    store, llm = Neo4jStore(settings), MistralLLM(settings)
+    store, llm = Neo4jStore(settings), GroqLLM(settings)
     embedder = LocalEmbedder(settings.embedding_model, settings.embedding_revision)
     service = MovieGraphRAG(store, embedder, llm, settings)
     manifest = store.manifest()

@@ -60,7 +60,7 @@ stratégies vector-first/parallèles et reranker seulement si un gain est démon
 ## validation réelle dans docker
 
 Les tests accèdent au serveur Neo4j, au modèle E5 et à l'API HTTP réellement exécutés
-dans les conteneurs. Le sous-ensemble `llm` appelle réellement Mistral ; aucune
+dans les conteneurs. Le sous-ensemble `llm` appelle réellement Groq ; aucune
 simulation ni réponse de remplacement n'est utilisée. Un garde-fou pytest interdit
 les exécutions sur l'hôte. La validation sans clé couvre le graphe, l'ingestion,
 les embeddings et les endpoints de données, mais ne valide pas l'analyse LLM.

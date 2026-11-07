@@ -10,7 +10,7 @@ Prérequis : Docker Desktop démarré, environ 4 Go de mémoire disponibles pour
 services et le modèle, accès réseau initial pour télécharger les images et E5.
 La consommation et la latence réelles dépendent de la machine.
 
-1. Copier `.env.example` vers `.env` et renseigner `MISTRAL_API_KEY`.
+1. Copier `.env.example` vers `.env` et renseigner `GROQ_API_KEY`.
 2. Acquérir les deux CSV depuis [Kaggle](https://www.kaggle.com/datasets/tmdb/tmdb-movie-metadata).
 3. Les placer sous `data/raw/tmdb_5000_movies.csv` et `data/raw/tmdb_5000_credits.csv`.
 4. Exécuter depuis ce répertoire :
@@ -23,7 +23,7 @@ docker compose exec api moviegraphrag ingest --output data/reports/manifest.json
 
 L'ingestion télécharge le modèle gratuit et crée les embeddings sur CPU. Elle
 peut prendre plusieurs minutes. Les CSV et caches ne sont jamais ajoutés à Git.
-La clé Mistral n'est pas nécessaire pour profiler ou ingérer.
+La clé Groq n'est pas nécessaire pour profiler ou ingérer.
 
 Swagger : <http://localhost:8000/docs>. Interface Neo4j : <http://localhost:7474>.
 Ports liés à localhost. Le mot de passe d'exemple est destiné au développement local.
@@ -73,19 +73,19 @@ frontière d'autorisation multiutilisateur et ne doit pas être publiée telle q
 
 Modèles, hashes, prompts, latence et consommation sont enregistrés dans les traces.
 Pour une reproduction stricte, fixer `EMBEDDING_REVISION` à un commit et
-`MISTRAL_MODEL` à un identifiant versionné disponible chez le fournisseur. Le modèle
+`GROQ_MODEL` à un identifiant disponible chez le fournisseur. Le modèle
 effectivement répondu est consigné ; `latest` n'est pas une garantie de stabilité.
 
 ## vérification
 
 Les tests refusent de démarrer hors Docker. Aucune doublure de Neo4j, E5, HTTP ou
-Mistral n'est utilisée. Les CSV manquants, un corpus non chargé ou une clé absente
+Groq n'est utilisée. Les CSV manquants, un corpus non chargé ou une clé absente
 sont des erreurs, sans remplacement par des données simulées.
 
 ```powershell
 # Après l'ingestion : stockage, embeddings réels et HTTP réel, sans appels LLM.
 docker compose --profile test run --rm tests python -m pytest -q tests/real -m 'not llm'
-# Validation complète, avec appels réels et facturables à Mistral.
+# Validation complète, avec appels réels à Groq.
 docker compose --profile test run --rm tests
 # Analyse statique, également dans Docker.
 docker compose --profile test run --rm tests python -m ruff check src tests evaluation
@@ -94,7 +94,7 @@ docker compose exec api moviegraphrag reference --output data/reports/reference.
 
 Le test d'idempotence réingère réellement le snapshot. Les vecteurs dont le hash,
 le modèle et la révision correspondent sont réutilisés. Les tests LLM nécessitent
-`MISTRAL_API_KEY` dans `.env` ; après modification de cette clé, recréer le service :
+`GROQ_API_KEY` dans `.env` ; après modification de cette clé, recréer le service :
 `docker compose up -d --force-recreate api`. Le fichier `/app/requirements.lock`
 dans l'image consigne les versions effectivement installées.
 

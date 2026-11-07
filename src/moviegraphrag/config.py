@@ -8,8 +8,8 @@ class Settings(BaseSettings):
     neo4j_user: str = "neo4j"
     neo4j_password: SecretStr = SecretStr("moviegraph-local")
     neo4j_database: str = "neo4j"
-    mistral_api_key: SecretStr = SecretStr("")
-    mistral_model: str = "mistral-small-latest"
+    groq_api_key: SecretStr = SecretStr("")
+    groq_model: str = "qwen/qwen3.8-27b"
     embedding_model: str = "intfloat/multilingual-e5-small"
     embedding_revision: str = "main"
     query_timeout: float = Field(default=5, gt=0)

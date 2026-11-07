@@ -7,7 +7,7 @@ from fastapi.responses import JSONResponse
 from moviegraphrag import __version__
 from moviegraphrag.config import Settings
 from moviegraphrag.embeddings import LocalEmbedder
-from moviegraphrag.llm.mistral import MistralLLM
+from moviegraphrag.llm.groq import GroqLLM
 from moviegraphrag.orchestration import MovieGraphRAG
 from moviegraphrag.retrieval.neo4j_store import Neo4jStore
 from moviegraphrag.schemas.models import AnswerResponse, Label, QuestionRequest
@@ -19,7 +19,7 @@ def create_app(service=None):
         if service is None:
             settings = Settings()
             store = Neo4jStore(settings)
-            llm = MistralLLM(settings)
+            llm = GroqLLM(settings)
             embedder = LocalEmbedder(settings.embedding_model, settings.embedding_revision)
             app.state.service = MovieGraphRAG(store, embedder, llm, settings)
             try:
@@ -43,7 +43,7 @@ def create_app(service=None):
         svc = app.state.service
         try:
             state = svc.store.readiness()
-            key = bool(svc.settings.mistral_api_key.get_secret_value())
+            key = bool(svc.settings.groq_api_key.get_secret_value())
             # Readiness never downloads a model. A warmup/semantic request loads it.
             model_loaded = svc.embedder.model is not None
             state.update(llm_configured=key, embedding_loaded=model_loaded)

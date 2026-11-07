@@ -50,6 +50,6 @@ def api():
 
 
 @pytest.fixture
-def mistral_configured(settings):
-    if not settings.mistral_api_key.get_secret_value():
-        pytest.fail("MISTRAL_API_KEY is missing. No simulated provider is permitted.")
+def groq_configured(settings):
+    if not settings.groq_api_key.get_secret_value():
+        pytest.fail("GROQ_API_KEY is missing. No simulated provider is permitted.")

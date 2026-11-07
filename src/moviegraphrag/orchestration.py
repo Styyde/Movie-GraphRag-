@@ -10,7 +10,7 @@ from moviegraphrag.evidence.context import build_context, validate_generated
 from moviegraphrag.evidence.validation import validate_assessments
 from moviegraphrag.linking.clarifications import Clarifications
 from moviegraphrag.linking.linker import EntityLinker
-from moviegraphrag.llm.mistral import Usage
+from moviegraphrag.llm.groq import Usage
 from moviegraphrag.llm.prompts import PROMPT_VERSION
 from moviegraphrag.retrieval.compiler import route
 from moviegraphrag.schemas.models import AnswerResponse, Coverage, Evidence, QuestionRequest

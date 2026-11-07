@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "moviegraphrag"
+version = "0.1.0"
+description = "Controlled, evidence-grounded movie GraphRAG"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi==0.115.12", "pydantic==2.11.5", "pydantic-settings==2.9.1",
+  "neo4j==5.28.1", "httpx==0.28.1", "uvicorn==0.34.2",
+]
+
+[project.optional-dependencies]
+embeddings = ["sentence-transformers==4.1.0"]
+dev = ["pytest==8.3.5", "ruff==0.11.12"]
+
+[project.scripts]
+moviegraphrag = "moviegraphrag.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+markers = ["integration: requires a running dedicated Neo4j test database", "dataset: requires local TMDB CSV files"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 105

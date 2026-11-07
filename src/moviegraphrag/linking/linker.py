@@ -30,6 +30,7 @@ class EntityLinker:
             candidates = self.store.find_entities(search, mention.type)
             original_candidates = list(candidates)
             context = []
+            blocked_by_context = None
             if mention.year is not None:
                 candidates = [c for c in candidates if c.year == mention.year]
                 context.append(f"release_year={mention.year}")
@@ -39,15 +40,27 @@ class EntityLinker:
             if mention.context_movie_ref:
                 movie = results.get(mention.context_movie_ref)
                 if not movie or movie.status != "resolved":
-                    candidates = []
-                    context.append("Identifying movie must be resolved first")
+                    # An ambiguous identifying film is pending information, not evidence
+                    # that this person does not exist. Keep their candidates for replay
+                    # after the film clarification instead of returning not_found.
+                    blocked_by_context = mention.context_movie_ref
+                    context.append("Resolve the identifying movie before selecting this person")
+                    if movie and movie.status == "not_found":
+                        candidates = []
                 else:
                     candidates = [c for c in candidates if self.store.context_matches(
                         c.id, movie.canonical_id, mention.role)]
                     context.append(f"explicit_movie={movie.canonical_id}")
             method = candidates[0].method if candidates else "none"
             chosen = None
+            too_many = len(candidates) > 10
+            if too_many:
+                context.append("More than ten candidates remain; refine the name or explicit context")
             if mention.ref in selections:
+                if blocked_by_context:
+                    raise ValueError("Resolve the identifying movie before selecting this person")
+                if too_many:
+                    raise ValueError("More than ten candidates remain; refine the name or explicit context")
                 selected = selections[mention.ref]
                 if selected not in allowed_selections[mention.ref]:
                     raise ValueError("Entity was not proposed in this clarification")
@@ -55,7 +68,7 @@ class EntityLinker:
                 if not chosen:
                     raise ValueError("Selected entity no longer satisfies the explicit context")
                 method = "user_confirmed"
-            elif len(candidates) == 1 and method != "fuzzy":
+            elif not blocked_by_context and len(candidates) == 1 and method != "fuzzy":
                 chosen = candidates[0]
                 method = "contextual" if context else method
             status = "resolved" if chosen else ("ambiguous" if candidates else "not_found")
@@ -63,5 +76,7 @@ class EntityLinker:
             results[mention.ref] = LinkResult(
                 mention=mention, status=status, canonical_id=chosen.id if chosen else None,
                 canonical_name=chosen.name if chosen else None, method=method,
-                contextual_evidence=context, alternatives=alternatives[:10])
+                contextual_evidence=context, alternatives=alternatives[:10],
+                total_candidates=len(alternatives), truncated=len(alternatives) > 10,
+                blocked_by_context=blocked_by_context)
         return [results[m.ref] for m in plan.mentions]

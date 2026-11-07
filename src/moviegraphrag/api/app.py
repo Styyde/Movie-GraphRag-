@@ -1,5 +1,6 @@
 import logging
 from contextlib import asynccontextmanager
+from threading import Event, Thread
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import JSONResponse
@@ -22,9 +23,31 @@ def create_app(service=None):
             llm = GroqLLM(settings)
             embedder = LocalEmbedder(settings.embedding_model, settings.embedding_revision)
             app.state.service = MovieGraphRAG(store, embedder, llm, settings)
+            app.state.model_error = None
+            stop = Event()
+            def warm_when_ready():
+                while not stop.is_set():
+                    try:
+                        manifest = store.manifest()
+                        if manifest and manifest.get("status") == "ready":
+                            metadata = embedder.metadata()
+                            indexed = manifest.get("embedding", {})
+                            if any(metadata.get(k) != indexed.get(k) for k in ("model", "revision", "dimensions")):
+                                raise RuntimeError("Embedding configuration differs from the indexed snapshot")
+                            return
+                    except Exception as exc:
+                        logging.getLogger(__name__).warning("Model warmup pending: %s", type(exc).__name__)
+                        if embedder.model is not None:
+                            app.state.model_error = "Embedding configuration mismatch"
+                            return
+                    stop.wait(5)
+            warmup = Thread(target=warm_when_ready, name="embedding-warmup", daemon=True)
+            warmup.start()
             try:
                 yield
             finally:
+                stop.set()
+                warmup.join(timeout=5)
                 llm.close()
                 store.close()
         else:
@@ -44,10 +67,13 @@ def create_app(service=None):
         try:
             state = svc.store.readiness()
             key = bool(svc.settings.groq_api_key.get_secret_value())
-            # Readiness never downloads a model. A warmup/semantic request loads it.
+            # The background startup worker warms the model after ingestion; this endpoint never downloads.
             model_loaded = svc.embedder.model is not None
             state.update(llm_configured=key, embedding_loaded=model_loaded)
-            state["ready"] = state["ready"] and key and model_loaded
+            model_error = getattr(app.state, "model_error", None)
+            state["ready"] = state["ready"] and key and model_loaded and not model_error
+            if model_error:
+                state["reason"] = model_error
             return JSONResponse(state, status_code=200 if state["ready"] else 503)
         except Exception:
             return JSONResponse({"ready": False, "reason": "Neo4j unavailable"}, status_code=503)

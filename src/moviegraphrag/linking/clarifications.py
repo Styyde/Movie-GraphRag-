@@ -19,7 +19,8 @@ class Clarifications:
         payload = {"question": hashlib.sha256(question.encode()).hexdigest(),
                    "expires": time.time() + self.ttl, "plan": plan.model_dump(mode="json"),
                    "allowed": {r.mention.ref: [c.id for c in r.alternatives]
-                               for r in links if r.status == "ambiguous"}}
+                               for r in links if r.status == "ambiguous"
+                               and not r.truncated and not r.blocked_by_context}}
         raw = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode()
         sig = hmac.new(self.secret, raw.encode(), hashlib.sha256).hexdigest()
         return raw + "." + sig

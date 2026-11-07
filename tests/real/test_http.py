@@ -1,4 +1,5 @@
 import pytest
+import time
 
 
 def test_real_http_health_movie_and_validation(api):
@@ -6,6 +7,19 @@ def test_real_http_health_movie_and_validation(api):
     assert api.get("/movies/27205").json()["title"] == "Inception"
     assert api.get("/movies/0").status_code == 422
     assert api.post("/questions", json={"question": "x", "cypher": "DELETE"}).status_code == 422
+
+
+@pytest.mark.llm
+def test_real_api_becomes_ready_without_a_semantic_question(api, groq_configured):
+    deadline = time.monotonic() + 120
+    while True:
+        response = api.get("/ready")
+        if response.status_code == 200:
+            assert response.json()["embedding_loaded"]
+            assert response.json()["llm_configured"]
+            return
+        assert time.monotonic() < deadline, response.json()
+        time.sleep(2)
 
 
 @pytest.mark.llm

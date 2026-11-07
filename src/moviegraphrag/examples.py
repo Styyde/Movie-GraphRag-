@@ -55,7 +55,7 @@ def reference_plan(key: str) -> QuestionDraft:
         edge("director", "DIRECTED", "witness")
         edge("director", "DIRECTED", "result")
         if key == "Q9":
-            bind("genre", "Science Fiction", "Genre")
+            bind("genre", "science-fiction", "Genre")
             edge("result", "IN_GENRE", "genre")
         theme = thematic("films parlant d'intelligence artificielle" if key == "Q9" else "films explorant la survie",
                          ["intelligence artificielle"] if key == "Q9" else ["survie"])

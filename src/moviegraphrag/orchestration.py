@@ -71,9 +71,12 @@ class MovieGraphRAG:
             return AnswerResponse(status="entity_not_found", resolved_entities=links, trace_id=trace_id,
                                   answer="Une entité ou son contexte explicite est absent du dataset.")
         if any(r.status == "ambiguous" for r in links):
+            clarification = ("Précisez le nom complet ou un contexte explicite : la liste de candidats est trop large."
+                             if any(r.truncated for r in links) else
+                             "Précisez d'abord les entités ambiguës parmi les candidats proposés.")
             return AnswerResponse(status="needs_clarification", resolved_entities=links,
                                   clarification_token=self.clarifications.issue(request.question, plan, links),
-                                  trace_id=trace_id, answer="Précisez l'entité parmi les candidats proposés.")
+                                  trace_id=trace_id, answer=clarification)
         bindings = {r.mention.ref: r.canonical_id for r in links}
         strategy = route(plan)
         coverage = Coverage(offset=request.offset)

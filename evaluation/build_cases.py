@@ -95,8 +95,12 @@ GROUPS = {
 
 
 def main():
+    from moviegraphrag.evaluation import graph_suite_reference, preserve_annotations, validate_cases
+
     root = Path(__file__).parent
     output = root / "cases.jsonl"
+    previous = [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()
+                if line.strip()] if output.exists() else []
     cases = []
     for category, questions in GROUPS.items():
         assert len(questions) == 20
@@ -104,19 +108,25 @@ def main():
             cases.append({"id": f"{category}-{i + 1:02}", "family": f"{category}-{i + 1:02}",
                           "category": category, "split": "dev" if i < 5 else "test",
                           "question": question, "answer_type": "person_list" if (
-                              category == "graph" and i in {1, 2, 3, 6, 7, 14}) else "movie_list",
+                              category == "graph" and i in {1, 2, 3, 6, 7, 14}
+                              or category == "robustness" and i in {4, 5, 6, 11}) else "movie_list",
                           "judgment_status": "pending_human_review", "relevance": {},
                           "exhaustive": False})
     movies, credits = Path("data/raw/tmdb_5000_movies.csv"), Path("data/raw/tmdb_5000_credits.csv")
-    if movies.exists() and credits.exists():
-        from moviegraphrag.evaluation import graph_reference
-        from moviegraphrag.ingestion.dataset import load_dataset
-        reference = graph_reference(load_dataset(movies, credits))
-        for i in range(4):
-            cases[i].update(relevance={str(mid): 1 for mid in reference[f"Q{i + 1}"]},
-                            exhaustive=True, judgment_status="csv_verified", snapshot_id=reference["snapshot_id"])
+    if not movies.exists() or not credits.exists():
+        raise FileNotFoundError("Both real source CSVs are required to build evaluation references")
+    references = graph_suite_reference(movies, credits)
+    for case in cases:
+        if case["id"] in references:
+            case.update(references[case["id"]])
+        elif case["id"] in {f"robustness-{i:02}" for i in range(16, 21)}:
+            case.update(expected_status="unsupported", expected_status_source="architecture_policy")
+        elif case["id"] == "robustness-04":
+            case.update(expected_status="needs_clarification", expected_status_source="fuzzy_linking_policy")
+    cases = preserve_annotations(cases, previous)
+    validate_cases(cases, next(iter(references.values()))["snapshot_id"])
     output.write_text("\n".join(json.dumps(c, ensure_ascii=False) for c in cases) + "\n", encoding="utf-8")
-    print(f"Wrote {len(cases)} cases; thematic judgments require human review.")
+    print(f"Wrote {len(cases)} cases, preserving human annotations; thematic judgments require human review.")
 
 
 if __name__ == "__main__":

@@ -99,14 +99,24 @@ class Neo4jStore:
             candidate = EntityCandidate(id=n[ID_PROPERTIES[label]], type=label, method=method,
                                         name=n.get("name", n.get("title", "")),
                                         year=n.get("release_year"))
-            if label == Label.PERSON:
-                role_rows = self.read("MATCH (p:Person {person_id:$id})-[r:ACTED_IN|DIRECTED]->(m:Movie) "
-                                      "RETURN type(r) AS role, m.title AS title ORDER BY title",
-                                      {"id": candidate.id})
-                candidate.roles = sorted({"actor" if r["role"] == "ACTED_IN" else "director"
-                                          for r in role_rows})
-                candidate.films = sorted({r["title"] for r in role_rows})[:5]
             result.append(candidate)
+        if label == Label.PERSON and result:
+            # Resolve role/context metadata in one round trip even for common surnames.
+            metadata = {candidate.id: {"roles": set(), "films": set()} for candidate in result}
+            role_rows = self.read(
+                "UNWIND $ids AS id MATCH (p:Person {person_id:id})"
+                "-[r:ACTED_IN|DIRECTED]->(m:Movie) "
+                "RETURN p.person_id AS id, type(r) AS role, m.title AS title",
+                {"ids": list(metadata)},
+            )
+            for row in role_rows:
+                item = metadata[row["id"]]
+                item["roles"].add("actor" if row["role"] == "ACTED_IN" else "director")
+                item["films"].add(row["title"])
+            for candidate in result:
+                item = metadata[candidate.id]
+                candidate.roles = sorted(item["roles"])
+                candidate.films = sorted(item["films"])[:5]
         return result
 
     def context_matches(self, person_id: int, movie_id: int, role: str | None):

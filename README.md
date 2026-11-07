@@ -35,8 +35,8 @@ Invoke-RestMethod -Method Post -Uri http://localhost:8000/questions `
 ```
 
 `/health` vérifie le processus. `/ready` exige un corpus chargé, les index disponibles,
-une clé LLM configurée et le modèle chargé dans le processus API. La première question
-sémantique charge le modèle en mémoire ; `/ready` ne déclenche aucun téléchargement.
+une clé LLM configurée et le modèle chargé dans le processus API. Un worker de démarrage
+charge le modèle après la disponibilité du corpus ; `/ready` ne déclenche aucun téléchargement.
 Une clé configurée ne prouve pas que le compte dispose de crédits.
 
 Pour une clarification, renvoyer exactement la même question avec le
@@ -108,12 +108,17 @@ docker compose exec api moviegraphrag evaluate --system flat --split dev --outpu
 ```
 
 Le jeu comprend 80 questions, réparties en quatre catégories. Les références
-relationnelles Q1–Q4, Q8–Q10 peuvent être produites indépendamment des requêtes Cypher.
+des 20 questions relationnelles sont calculées depuis les CSV bruts indépendamment
+des requêtes Cypher ; les noms réellement ambigus restent explicitement non résolus.
+La régénération préserve les annotations humaines et vérifie les familles, les splits et le snapshot.
 Les annotations thématiques et de centralité restent à relire : les champs vides
 ne sont jamais convertis en zéros de performance et aucun gain n'est inventé.
 
-Le runner fournit les métriques de retrieval lorsque les jugements sont renseignés,
-les latences et traces. Pour les réponses de type Person, les baselines vectorielles
+Le runner fournit les métriques de retrieval lorsque les jugements sont vérifiés,
+les latences et traces. L'égalité de l'ensemble complet du graphe est évaluée séparément
+du top 5 et de sa première page. La latence de ce retrieval supplémentaire est séparée
+de la latence du pipeline complet ; elle n'est pas confondue avec celle des baselines.
+Pour les réponses de type Person, les baselines vectorielles
 retournent des documents Movie : la comparaison doit porter sur les preuves retrouvées
 ou une réponse évaluée humainement, pas comparer des IDs de personnes à des IDs de films.
 Le baseline `flat` découpe les longues listes de crédits pour ne pas les perdre dans

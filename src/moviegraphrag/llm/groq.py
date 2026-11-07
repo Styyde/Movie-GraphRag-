@@ -7,6 +7,7 @@ from pydantic import ValidationError
 
 from moviegraphrag.llm.prompts import ANALYZER, ASSESSOR, GENERATOR
 from moviegraphrag.examples import QUESTIONS, reference_plan
+from moviegraphrag.ingestion.dataset import normalize
 from moviegraphrag.schemas.models import AssessmentBatch, GeneratedAnswer, QuestionDraft
 
 
@@ -54,7 +55,7 @@ class GroqLLM:
     def close(self):
         self.client.close()
 
-    def structured(self, schema, system, payload, usage: Usage):
+    def structured(self, schema, system, payload, usage: Usage, output_schema=None):
         if not self.settings.groq_api_key.get_secret_value():
             raise RuntimeError("GROQ_API_KEY is not configured")
         request = {"model": self.settings.groq_model, "temperature": 0,
@@ -62,7 +63,7 @@ class GroqLLM:
                    "messages": [{"role": "system", "content": system},
                                 {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}],
                    "response_format": {"type": "json_schema", "json_schema": {
-                       "name": schema.__name__, "schema": strict_schema(schema.model_json_schema()), "strict": True}}}
+                       "name": schema.__name__, "schema": strict_schema(output_schema or schema.model_json_schema()), "strict": True}}}
         for attempt in range(3):
             usage.calls += 1
             try:
@@ -91,16 +92,32 @@ class GroqLLM:
             "Each mentioned entity must be bound using mention_ref. Never return an empty variables array.\n" \
             + "\n".join("Worked example question: " + QUESTIONS[k] + "\nValid plan: " +
                         reference_plan(k).model_dump_json() for k in ("Q1", "Q4", "Q9"))
-        try:
-            return self.structured(QuestionDraft, system, payload, usage)
-        except ValidationError as exc:
-            return self.structured(QuestionDraft, system,
-                                   {**payload, "validation_errors": str(exc)[:4000],
-                                    "instruction": "Correct the plan once; reject unsupported requests."}, usage)
+        for attempt in range(2):
+            try:
+                plan = self.structured(QuestionDraft, system, payload, usage)
+                original = normalize(question)
+                for mention in plan.mentions:
+                    if normalize(mention.text) not in original:
+                        raise ValueError("Entity mentions must be literal question excerpts; never expand names or translate genres.")
+                    if mention.year is not None and str(mention.year) not in question:
+                        raise ValueError("An identifying year must be explicitly present in the question.")
+                return plan
+            except (ValidationError, ValueError) as exc:
+                if attempt:
+                    return QuestionDraft(supported=False, unsupported_reason=
+                                         "La question n'a pas pu être représentée fidèlement après validation.")
+                payload = {"question": question, "validation_errors": str(exc)[:4000],
+                           "instruction": "Correct the plan once; preserve exact mentions; reject unsupported requests."}
 
     def assess(self, theme, movies, usage):
+        output = AssessmentBatch.model_json_schema()
+        output["properties"]["films"].update(minItems=len(movies), maxItems=len(movies))
+        output["$defs"]["FilmAssessment"]["properties"]["movie_id"]["enum"] = [m["movie_id"] for m in movies]
+        output["$defs"]["FilmAssessment"]["properties"]["judgments"].update(
+            minItems=len(theme.themes), maxItems=len(theme.themes))
+        output["$defs"]["ThemeJudgment"]["properties"]["theme"]["enum"] = theme.themes
         return self.structured(AssessmentBatch, ASSESSOR,
-                               {"request": theme.model_dump(), "movies": movies}, usage)
+                               {"request": theme.model_dump(), "movies": movies}, usage, output)
 
     def generate(self, context, usage):
         return self.structured(GeneratedAnswer, GENERATOR, context, usage)

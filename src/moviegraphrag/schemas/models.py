@@ -183,6 +183,9 @@ class LinkResult(StrictModel):
     method: str
     contextual_evidence: list[str] = Field(default_factory=list)
     alternatives: list[EntityCandidate] = Field(default_factory=list)
+    total_candidates: int = Field(default=0, ge=0)
+    truncated: bool = False
+    blocked_by_context: str | None = None
 
 
 class QuestionRequest(StrictModel):
@@ -204,11 +207,11 @@ class ThemeJudgment(StrictModel):
 
 class FilmAssessment(StrictModel):
     movie_id: int
-    judgments: list[ThemeJudgment]
+    judgments: list[ThemeJudgment] = Field(min_length=1, max_length=5)
 
 
 class AssessmentBatch(StrictModel):
-    films: list[FilmAssessment]
+    films: list[FilmAssessment] = Field(min_length=1, max_length=20)
 
 
 class CitationStatement(StrictModel):
@@ -217,7 +220,7 @@ class CitationStatement(StrictModel):
 
 
 class GeneratedAnswer(StrictModel):
-    statements: list[CitationStatement]
+    statements: list[CitationStatement] = Field(min_length=1)
 
 
 class Evidence(StrictModel):

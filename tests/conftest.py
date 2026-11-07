@@ -1,5 +1,6 @@
 """Tests are deliberately restricted to Docker and real dependencies."""
 import os
+import time
 from pathlib import Path
 
 import httpx
@@ -45,7 +46,15 @@ def embedder(settings):
 @pytest.fixture(scope="session")
 def api():
     with httpx.Client(base_url=os.environ.get("API_BASE_URL", "http://api:8000"), timeout=300) as client:
-        assert client.get("/health").status_code == 200, "Real API container must be running"
+        deadline = time.monotonic() + 60
+        while True:
+            try:
+                if client.get("/health").status_code == 200:
+                    break
+            except httpx.RequestError:
+                pass
+            assert time.monotonic() < deadline, "Real API container must be running"
+            time.sleep(1)
         yield client
 
 

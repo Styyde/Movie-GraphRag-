@@ -55,9 +55,11 @@ class MovieGraphRAG:
         trace["snapshot_id"] = manifest["snapshot_id"]
         trace["source_hashes"] = {k: manifest[k] for k in ("movies_sha256", "credits_sha256")}
         trace["embedding"] = manifest.get("embedding")
-        allowed = {}
+        allowed, confirmed = {}, {}
         if request.clarification_token:
-            plan, allowed = self.clarifications.verify(request.clarification_token, request.question)
+            plan, allowed, confirmed = self.clarifications.verify(request.clarification_token, request.question)
+            if set(request.selections) - set(allowed):
+                raise ValueError("Only new selections proposed by this clarification are accepted")
         else:
             if request.selections:
                 raise ValueError("Selections require a clarification token")
@@ -66,7 +68,11 @@ class MovieGraphRAG:
         trace["plan"] = plan.model_dump(mode="json")
         if not plan.supported:
             return AnswerResponse(status="unsupported", answer=plan.unsupported_reason, trace_id=trace_id)
-        links = self.linker.link(plan, request.selections, allowed)
+        # Confirmed choices come only from the signed token, never from the client.
+        # Re-run linking for every choice so source/context changes cannot bypass validation.
+        selections = {**confirmed, **request.selections}
+        authorized = {**allowed, **{ref: [entity_id] for ref, entity_id in confirmed.items()}}
+        links = self.linker.link(plan, selections, authorized)
         if any(r.status == "not_found" for r in links):
             return AnswerResponse(status="entity_not_found", resolved_entities=links, trace_id=trace_id,
                                   answer="Une entité ou son contexte explicite est absent du dataset.")
@@ -79,6 +85,7 @@ class MovieGraphRAG:
                                   trace_id=trace_id, answer=clarification)
         bindings = {r.mention.ref: r.canonical_id for r in links}
         strategy = route(plan)
+        result_type = next(variable.label.value for variable in plan.variables if variable.ref == plan.target)
         coverage = Coverage(offset=request.offset)
         warnings = []
         if strategy == "GRAPH":
@@ -92,7 +99,7 @@ class MovieGraphRAG:
                 proof = self.store.witnesses(plan, bindings, c["id"])
                 ev = Evidence(id=f"g{c['id']}", kind="relation", entity_id=c["id"], data=proof)
                 evidence.append(ev)
-                results.append({**c, "evidence_ids": [ev.id]})
+                results.append({**c, "type": result_type, "evidence_ids": [ev.id]})
         else:
             if request.offset:
                 raise ValueError("Semantic recommendations are not pageable; offset must be zero")
@@ -139,7 +146,8 @@ class MovieGraphRAG:
                         proofs.append(Evidence(id=f"g{c['id']}", kind="relation", entity_id=c["id"],
                                                data=self.store.witnesses(plan, bindings, c["id"])))
                     evidence.extend(proofs)
-                    results.append({**c, "judgments": [j.model_dump() for j in assessment.judgments],
+                    results.append({**c, "type": result_type,
+                                    "judgments": [j.model_dump() for j in assessment.judgments],
                                     "evidence_ids": [e.id for e in proofs]})
                 if len(results) >= request.limit:
                     break

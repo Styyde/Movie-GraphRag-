@@ -1,6 +1,10 @@
 import json
+import logging
+import math
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 
 import httpx
 from pydantic import ValidationError
@@ -9,6 +13,25 @@ from moviegraphrag.llm.prompts import ANALYZER, ASSESSOR, GENERATOR
 from moviegraphrag.examples import QUESTIONS, reference_plan
 from moviegraphrag.ingestion.dataset import normalize
 from moviegraphrag.schemas.models import AssessmentBatch, GeneratedAnswer, QuestionDraft
+
+logger = logging.getLogger(__name__)
+
+
+def retry_after_seconds(value):
+    """Honor Retry-After seconds or HTTP dates; invalid headers use normal backoff."""
+    if not value:
+        return None
+    try:
+        seconds = float(value)
+    except ValueError:
+        try:
+            when = parsedate_to_datetime(value)
+            if when.tzinfo is None:
+                when = when.replace(tzinfo=timezone.utc)
+            seconds = (when - datetime.now(timezone.utc)).total_seconds()
+        except (TypeError, ValueError, OverflowError):
+            return None
+    return max(0.0, seconds) if math.isfinite(seconds) else None
 
 
 @dataclass
@@ -64,6 +87,7 @@ class GroqLLM:
                                 {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}],
                    "response_format": {"type": "json_schema", "json_schema": {
                        "name": schema.__name__, "schema": strict_schema(output_schema or schema.model_json_schema()), "strict": True}}}
+        retry_deadline = time.monotonic() + 60
         for attempt in range(3):
             usage.calls += 1
             try:
@@ -74,9 +98,28 @@ class GroqLLM:
                     raise
                 time.sleep(0.5 * (attempt + 1))
                 continue
-            if response.status_code in {429, 500, 502, 503, 504} and attempt < 2:
-                time.sleep(0.5 * (attempt + 1))
-                continue
+            if response.is_error:
+                try:
+                    error = response.json().get("error", {})
+                except (ValueError, AttributeError):
+                    error = {}
+                if not isinstance(error, dict):
+                    error = {}
+                secret = self.settings.groq_api_key.get_secret_value()
+                def safe(value):
+                    return str(value).replace(secret, "[redacted]").replace("\n", " ").replace("\r", " ")[:1600]
+                logger.warning("Groq request failed status=%s schema=%s code=%s message=%s retry_after=%s",
+                               response.status_code, schema.__name__, safe(error.get("code", "unknown")),
+                               safe(error.get("message", "No provider error message")),
+                               safe(response.headers.get("retry-after", "unspecified")))
+                if response.status_code in {429, 500, 502, 503, 504} and attempt < 2:
+                    delay = retry_after_seconds(response.headers.get("retry-after"))
+                    delay = delay if delay is not None else 2.0 ** attempt
+                    if delay <= retry_deadline - time.monotonic():
+                        time.sleep(delay)
+                        continue
+                    # A long daily/account limit must not become a premature retry.
+                    logger.warning("Groq retry deferred: provider delay exceeds request retry budget")
             response.raise_for_status()
             result = response.json()
             usage.models.add(result.get("model", self.settings.groq_model))

@@ -1,8 +1,34 @@
-# moviegraphrag
+# MovieGraphRAG
 
-Pipeline contrôlé de questions sur les films : Neo4j vérifie les contraintes,
-E5 classe les candidats, et chaque résultat conserve ses preuves. Pas de Cypher
-généré par le LLM, pas d'agent autonome, pas de seconde base.
+Explorez **4 803 films** en français : collaborations entre acteurs et réalisateurs,
+genres et thèmes des synopsis. Chaque résultat donne accès aux sources qui l'expliquent.
+
+Neo4j vérifie les relations, les embeddings multilingues E5 classent les candidats,
+et Groq analyse les questions et les preuves thématiques dans un pipeline contrôlé.
+
+## fonctionnalités
+
+- Interface responsive en français : recherche, exemples, résultats et fiches de film.
+- Recherche relationnelle, thématique ou hybride avec contraintes obligatoires.
+- Désambiguïsation des personnes et des titres, avec confirmation explicite.
+- Preuves consultables : crédits, chemins de collaboration, extraits et keywords.
+- Pagination des listes relationnelles et couverture explicite des recherches thématiques.
+- Ingestion reproductible, traçabilité du dataset et évaluation comparative.
+
+## stack
+
+| Composant | Technologie |
+| --- | --- |
+| Interface | HTML, CSS et JavaScript natif, servis par FastAPI |
+| API | Python 3.12, FastAPI, Pydantic v2 |
+| Graphe et index vectoriel | Neo4j Community 5.26.0 |
+| Embeddings locaux | `intfloat/multilingual-e5-small`, 384 dimensions |
+| LLM | Groq, modèle configurable dans `.env` |
+| Exécution | Docker Compose : API et Neo4j |
+| Tests navigateur | Playwright et Chromium headless dans un conteneur optionnel |
+
+Une seule base conserve le graphe et les vecteurs. Le LLM produit un plan validé ;
+les requêtes Cypher proviennent de motifs autorisés et paramétrés.
 
 ## démarrage avec docker
 
@@ -10,7 +36,8 @@ Prérequis : Docker Desktop démarré, environ 4 Go de mémoire disponibles pour
 services et le modèle, accès réseau initial pour télécharger les images et E5.
 La consommation et la latence réelles dépendent de la machine.
 
-1. Copier `.env.example` vers `.env` et renseigner `GROQ_API_KEY`.
+1. Créer `.env` à partir de `.env.example` s'il n'existe pas, puis renseigner `GROQ_API_KEY`.
+   Conserver le fichier déjà configuré. Ne jamais ajouter une vraie clé à Git.
 2. Acquérir les deux CSV depuis [Kaggle](https://www.kaggle.com/datasets/tmdb/tmdb-movie-metadata).
 3. Les placer sous `data/raw/tmdb_5000_movies.csv` et `data/raw/tmdb_5000_credits.csv`.
 4. Exécuter depuis ce répertoire :
@@ -28,6 +55,31 @@ La clé Groq n'est pas nécessaire pour profiler ou ingérer.
 Application : <http://localhost:8000>. Swagger : <http://localhost:8000/docs>.
 Interface Neo4j : <http://localhost:7474>.
 Ports liés à localhost. Le mot de passe d'exemple est destiné au développement local.
+
+Si le corpus est déjà ingéré, il suffit de relancer les services :
+
+```powershell
+docker compose up -d
+```
+
+Attendre **Prêt à explorer** dans l'interface avant d'envoyer une question.
+
+## configuration
+
+| Variable | Rôle |
+| --- | --- |
+| `GROQ_API_KEY` | Clé du compte Groq, utilisée uniquement par le backend. |
+| `GROQ_MODEL` | Identifiant du modèle, compatible avec les sorties structurées strictes. |
+| `NEO4J_USER`, `NEO4J_PASSWORD`, `NEO4J_DATABASE` | Connexion au graphe. |
+| `EMBEDDING_MODEL`, `EMBEDDING_REVISION` | Modèle local et révision du snapshot vectoriel. |
+| `SYNTHESIS_ENABLED` | Active la synthèse LLM française après sélection des preuves. |
+| `SEMANTIC_BUDGET`, `EVIDENCE_BATCH_SIZE` | Maximum de candidats examinés et taille des lots. |
+| `LLM_INPUT_USD_PER_MILLION`, `LLM_OUTPUT_USD_PER_MILLION` | Tarifs facultatifs pour estimer le coût des traces. |
+
+Les valeurs initiales figurent dans [.env.example](.env.example). Compose configure
+automatiquement l'URI interne `bolt://neo4j:7687` et le cache des modèles.
+Un changement de modèle d'embeddings demande un index compatible ; il ne suffit pas
+de modifier son nom pour réutiliser les vecteurs existants.
 
 ## interface de recherche
 
@@ -50,6 +102,33 @@ Les erreurs et la couverture partielle sont affichées explicitement. Un jeton e
 demande de relancer la question. Aucun historique n'est conservé après rechargement ;
 la clé Groq reste côté serveur. Les résultats API exposent `type: Movie | Person`.
 
+Quelques scénarios à essayer directement dans l'interface :
+
+| Question | Vérification attendue |
+| --- | --- |
+| Quels films ont été réalisés par Christopher Nolan avec Cillian Murphy ? | Quatre films ; ouvrir les preuves et les détails d'Inception. |
+| Quels réalisateurs ont travaillé avec Leonardo DiCaprio ? | Dix-sept personnes ; parcourir les pages avec une limite de cinq. |
+| Quels films ont Tom Holland au casting ? | Confirmer l'identité proposée si le nom reste ambigu. |
+| Quels films de Nolan avec DiCaprio parlent des rêves ? | Inception, avec preuves relationnelles et thématiques. |
+| Quels films sont réalisés par UnePersonneInexistanteXYZ ? | Entité absente, sans remplacement par des recommandations. |
+
+Les recherches appellent réellement Groq et dépendent de sa disponibilité et des
+limites du compte. Une erreur fournisseur reste affichée, sans réponse inventée.
+
+## api
+
+| Méthode et endpoint | Fonction |
+| --- | --- |
+| `GET /` | Interface web. |
+| `POST /questions` | Réponse, résultats, preuves, couverture et référence de trace. |
+| `GET /entities/search?q=...&type=Person` | Candidats d'identification ; types `Person`, `Movie`, `Genre`. |
+| `GET /movies/{movie_id}` | Données sources d'un film, sans son vecteur. |
+| `GET /health` | Processus vivant. |
+| `GET /ready` | Corpus, index, configuration LLM et modèle local disponibles. |
+| `GET /docs` | Documentation interactive Swagger. |
+
+Exemple d'appel manuel depuis PowerShell :
+
 ```powershell
 Invoke-RestMethod -Method Post -Uri http://localhost:8000/questions `
   -ContentType application/json `
@@ -67,6 +146,53 @@ Les IDs doivent provenir des candidats proposés. Les jetons expirent après 30 
 et sont invalidés au redémarrage de l'API. Les questions graphe acceptent `offset` ;
 les recommandations sémantiques n'ont pas de pagination exhaustive.
 
+Une réponse HTTP 200 peut signaler `needs_clarification`, `entity_not_found`,
+`no_match_in_dataset`, `insufficient_evidence`, `unsupported` ou `dependency_error`.
+Les clients doivent donc examiner le champ `status`, pas seulement le code HTTP.
+
+## architecture
+
+```mermaid
+flowchart LR
+    CSV[CSV TMDB] --> ING[Validation et ingestion]
+    ING --> NEO[(Neo4j)]
+    ING --> E5[Documents et embeddings E5]
+    E5 --> NEO
+    UI[Interface web] --> API[FastAPI]
+    API --> PLAN[Analyse Groq et linking]
+    PLAN --> ROUTE[Router contrôlé]
+    ROUTE --> NEO
+    NEO --> PROOF[Preuves et contexte]
+    PROOF --> API
+    API --> UI
+```
+
+Le modèle du graphe est `Person → ACTED_IN / DIRECTED → Movie → IN_GENRE → Genre`.
+Les keywords sont conservés sur les films. En hybride, le graphe sélectionne tous
+les films admissibles avant le calcul de similarité exacte. Les détails figurent
+dans [la documentation d'architecture](docs/architecture.md).
+
+```text
+moviegraphrag/
+├── src/moviegraphrag/
+│   ├── api/          # endpoints et ressources statiques
+│   ├── web/          # interface HTML, CSS et JavaScript
+│   ├── ingestion/    # profilage et chargement des CSV
+│   ├── linking/      # identités et clarifications signées
+│   ├── retrieval/    # Cypher, index et classement
+│   ├── evidence/     # validation des preuves et contexte
+│   ├── llm/          # adaptateur Groq et prompts
+│   └── schemas/      # contrats validés
+├── tests/real/       # tests backend avec dépendances réelles
+├── tests/browser/    # parcours Chromium réels
+├── evaluation/       # cas, baselines et rapports
+├── data/raw/         # CSV locaux, exclus de Git
+├── data/reports/     # profilage et rapports locaux
+├── docs/
+├── compose.yaml
+└── .env.example
+```
+
 ## environnement docker
 
 L'application et tous ses tests s'exécutent dans Docker. Aucun Python système n'est
@@ -75,6 +201,30 @@ redémarrer le service API après une modification de code. La famille Neo4j ret
 5.26 LTS ; Compose utilise explicitement `5.26.0-community`, à mettre à jour vers un
 correctif validé avant tout déploiement exposé. L'application ne fournit pas de
 frontière d'autorisation multiutilisateur et ne doit pas être publiée telle quelle.
+
+```powershell
+# État des services et erreurs récentes.
+docker compose ps
+docker compose logs --tail 100 api
+# Après une modification Python.
+docker compose restart api
+# Arrêter les services en conservant le volume Neo4j et les fichiers locaux.
+docker compose down
+```
+
+## dépannage
+
+| Symptôme | Action |
+| --- | --- |
+| Docker ne répond pas | Démarrer Docker Desktop avec les conteneurs Linux. |
+| Préparation en cours | Attendre le chargement E5 ; vérifier l'ingestion et les logs API. |
+| CSV manquants | Vérifier les deux noms et leur emplacement sous `data/raw/`. |
+| Clé Groq modifiée | Recréer l'API avec `docker compose up -d --force-recreate api`. |
+| Groq 429 | Limite du compte atteinte ; respecter le délai fournisseur. Les reprises sont bornées. |
+| Groq 400 | Consulter le code et le message fournisseur dans les logs API. |
+| Clarification expirée | Relancer explicitement la question ; les tokens expirent après 30 minutes ou au redémarrage API. |
+| Modèle/index incompatibles | Rétablir le modèle du snapshot ou préparer une ingestion dans une base dédiée. |
+| Premier build navigateur lent | Laisser terminer le téléchargement de Chromium ; il sert uniquement aux tests. |
 
 ## comportement et limites
 

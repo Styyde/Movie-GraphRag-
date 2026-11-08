@@ -57,6 +57,24 @@ Les résultats structurés ne sont pas tronqués quand le contexte de synthèse 
 V2 : ingestion incrémentale, alias enrichis, motifs supplémentaires, benchmark des
 stratégies vector-first/parallèles et reranker seulement si un gain est démontré.
 
+## interface web
+
+FastAPI sert la page `/` et les ressources `/static/`. Le frontend HTML, CSS et
+JavaScript natif appelle les endpoints sur la même origine ; aucun service web
+supplémentaire ni clé Groq côté navigateur n'est nécessaire. Les ressources sont
+incluses dans le package Python.
+
+L'état de recherche reste en mémoire : question exacte, token de clarification,
+réponse et pages déjà consultées. Modifier la question ou la limite réinitialise
+cet état. Seule la stratégie GRAPH propose une pagination ; revenir sur une page
+en cache ne déclenche pas d'appel LLM. Le champ `type` des résultats distingue les
+films des personnes avant tout chargement de fiche film.
+
+Les tokens signés conservent les choix déjà confirmés. Le serveur n'accepte que
+les nouveaux choix proposés, restaure les précédents et revalide leur contexte
+dans Neo4j. Un token expiré demande une relance explicite. Les valeurs sources sont
+rendues comme du texte et les citations ne ciblent que des preuves présentes.
+
 ## validation réelle dans docker
 
 Les tests accèdent au serveur Neo4j, au modèle E5 et à l'API HTTP réellement exécutés
@@ -64,3 +82,7 @@ dans les conteneurs. Le sous-ensemble `llm` appelle réellement Groq ; aucune
 simulation ni réponse de remplacement n'est utilisée. Un garde-fou pytest interdit
 les exécutions sur l'hôte. La validation sans clé couvre le graphe, l'ingestion,
 les embeddings et les endpoints de données, mais ne valide pas l'analyse LLM.
+
+Le service optionnel `browser-tests` vérifie l'interface avec Playwright et Chromium
+réels, via l'API, Neo4j et Groq. Son garde-fou vérifie également Docker. Il ne
+remplace aucune réponse réseau ; les captures et rapports restent dans `.runtime/browser/`.

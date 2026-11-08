@@ -1,0 +1,15 @@
+# Ubuntu's Node package avoids the large bundled Node runtime in the Python wheel.
+# https://playwright.dev/docs/docker
+FROM ubuntu:26.04@sha256:3595d7fc4286a33fad0fd853a4063e654287a9c3787437d7937c94ca3f7a804e
+WORKDIR /browser-tests
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates nodejs npm \
+    && node -e 'if (Number(process.versions.node.split(".")[0]) < 20) process.exit(1)' \
+    && node --version && npm --version
+COPY tests/browser/package.json /opt/browser-runner/package.json
+RUN npm install --prefix /opt/browser-runner --no-audit --no-fund \
+    && /opt/browser-runner/node_modules/.bin/playwright install --with-deps --only-shell chromium \
+    && rm -rf /var/lib/apt/lists/*
+COPY tests/browser/ /browser-tests/
+ENV API_BASE_URL=http://api:8000 BROWSER_ARTIFACTS=/artifacts NODE_PATH=/opt/browser-runner/node_modules
+CMD ["/opt/browser-runner/node_modules/.bin/playwright", "test", "--config=/browser-tests/playwright.config.js"]

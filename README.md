@@ -64,6 +64,25 @@ docker compose up -d
 
 Attendre **Prêt à explorer** dans l'interface avant d'envoyer une question.
 
+### état local conservé
+
+Les conteneurs API et Neo4j sont conservés avec la politique `unless-stopped` :
+ils redémarrent avec Docker Desktop sauf arrêt manuel. Le volume nommé Neo4j
+conserve le graphe et les vecteurs ; `data/` et `models/` restent sur la machine.
+Une image locale `moviegraphrag:saved-20261108` conserve le code de l'application
+et du frontend avec les dépendances déjà installées. Elle ne contient pas `.env`,
+la clé Groq, les CSV, le volume Neo4j ou le cache du modèle.
+
+Pour relancer cet état sans installation ni reconstruction :
+
+```powershell
+docker compose up -d --no-build --pull never
+```
+
+Conserver ce répertoire, le fichier `.env`, les caches et le volume Docker.
+Les tests navigateur sont optionnels : leur installation a été interrompue à la
+demande de l'utilisateur et leurs parcours ne sont pas validés.
+
 ## configuration
 
 | Variable | Rôle |

@@ -1,6 +1,7 @@
 services:
   neo4j:
     image: neo4j:5.26.0-community
+    restart: unless-stopped
     environment:
       NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:-moviegraph-local}
       NEO4J_server_memory_heap_initial__size: 512m
@@ -18,6 +19,7 @@ services:
       retries: 30
   api:
     image: moviegraphrag:local
+    restart: unless-stopped
     build: .
     env_file: .env
     environment:

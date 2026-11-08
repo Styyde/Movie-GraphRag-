@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0d1218">
+  <meta name="description" content="Explorez les films, leurs liens et leurs thèmes avec des réponses fondées sur les données TMDB 5000.">
+  <title>MovieGraphRAG — le cinéma, relié</title>
+  <link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/styles.css">
+  <script type="module" src="/static/app.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#question">Aller à la recherche</a>
+  <div class="app-shell">
+    <header class="site-header">
+      <a class="brand" href="/" aria-label="MovieGraphRAG, accueil">
+        <svg class="brand-mark" viewBox="0 0 40 40" aria-hidden="true"><rect x="1" y="1" width="38" height="38" rx="11"/><path d="M15 12 29 20 15 28Z"/><circle cx="11" cy="10" r="2"/><circle cx="30" cy="30" r="2"/></svg>
+        <span>Movie<span class="brand-light">GraphRAG</span><small>LE CINÉMA, RELIÉ.</small></span>
+      </a>
+      <div class="header-end">
+        <span class="corpus-label">Collection TMDB 5000</span>
+        <span id="readiness" class="readiness" data-state="loading" role="status"><span class="status-dot"></span><span id="readiness-label">Connexion…</span></span>
+        <button id="retry-ready" class="text-button" type="button" hidden>Réessayer</button>
+      </div>
+    </header>
+
+    <main>
+      <section class="intro" aria-labelledby="page-title">
+        <div>
+          <p class="eyebrow"><span class="short-rule"></span> EXPLORER AU-DELÀ DU TITRE</p>
+          <h1 id="page-title">Des films. Des liens.<br><em>Des réponses sourcées.</em></h1>
+          <p class="intro-copy">Une collaboration, une idée, une envie de cinéma.<br>Posez votre question et découvrez ce qui relie les films.</p>
+        </div>
+        <div class="collection-note" aria-label="Collection de 4 803 films">
+          <span class="orbit" aria-hidden="true"><i></i><i></i><i></i><b>✦</b></span>
+          <strong>4 803<span>films à explorer</span></strong>
+          <p>Du casting aux thèmes,<br>chaque réponse garde ses sources.</p>
+        </div>
+      </section>
+
+      <section class="search-section" aria-label="Rechercher des films et des personnes">
+        <form id="search-form" class="search-panel">
+          <div class="section-label"><span class="step-number">01</span><label for="question">Votre question</label><span class="language-label">EN FRANÇAIS</span></div>
+          <textarea id="question" name="question" rows="3" minlength="3" maxlength="3000" required placeholder="Quels films de Nolan avec DiCaprio parlent des rêves ?" aria-describedby="question-help"></textarea>
+          <div class="search-toolbar">
+            <p id="question-help">Des noms, des relations ou des thèmes. À vous de choisir.</p>
+            <div class="search-actions">
+              <label class="limit-control" for="limit"><span>Résultats</span><select id="limit" name="limit"><option value="5">5</option><option value="10">10</option><option value="20">20</option></select></label>
+              <button id="search-submit" class="primary-button" type="submit" disabled><span id="submit-label">Explorer</span><span class="button-arrow" aria-hidden="true">↗</span><span id="search-spinner" class="spinner" hidden aria-hidden="true"></span></button>
+            </div>
+          </div>
+        </form>
+        <div class="examples" aria-label="Exemples de questions">
+          <button class="example-button" type="button" data-question="Quels films ont été réalisés par Christopher Nolan avec Cillian Murphy ?"><span class="example-kind">LES COLLABORATIONS</span><span>Nolan × Cillian Murphy<span aria-hidden="true">↗</span></span></button>
+          <button class="example-button" type="button" data-question="Quels films explorent les conséquences de l’intelligence artificielle sur l’humanité ?"><span class="example-kind">LES THÈMES</span><span>Et si l’IA changeait tout ?<span aria-hidden="true">↗</span></span></button>
+          <button class="example-button" type="button" data-question="Quels films de Nolan avec DiCaprio parlent des rêves ?"><span class="example-kind">LES DEUX, ENSEMBLE</span><span>DiCaprio, Nolan et les rêves<span aria-hidden="true">↗</span></span></button>
+        </div>
+      </section>
+
+      <p id="status-message" class="status-message" role="status" aria-live="polite" aria-atomic="true"></p>
+
+      <section id="clarification" class="clarification-panel" aria-labelledby="clarification-title" hidden>
+        <p class="eyebrow">UNE PRÉCISION AVANT DE CONTINUER</p>
+        <h2 id="clarification-title" tabindex="-1">De qui ou de quel film parlez-vous ?</h2>
+        <p>Certains noms correspondent à plusieurs entrées. Choisissez l’identité recherchée.</p>
+        <form id="clarification-form"><div id="clarification-fields"></div><button class="primary-button" type="submit">Confirmer les choix <span aria-hidden="true">→</span></button></form>
+        <button id="restart-search" class="text-button" type="button" hidden>Relancer cette question</button>
+      </section>
+
+      <section id="results-section" aria-labelledby="results-title" aria-busy="false" hidden>
+        <div class="results-heading"><div><p class="eyebrow">LES PISTES TROUVÉES</p><h2 id="results-title" tabindex="-1">Vos résultats</h2></div><span id="strategy-label" class="badge"></span></div>
+        <div id="warnings" class="warnings" hidden></div>
+        <div id="answer-panel" class="answer-panel" hidden><span class="section-caption">LA RÉPONSE</span><div id="answer"></div></div>
+        <p id="coverage" class="coverage"></p>
+        <div id="results" class="results-list"></div>
+        <nav id="pagination" class="pagination" aria-label="Pages de résultats" hidden><button id="previous-page" class="secondary-button" type="button">← Précédent</button><span id="page-label"></span><button id="next-page" class="secondary-button" type="button">Suivant →</button></nav>
+        <p id="trace-label" class="trace-label"></p>
+      </section>
+
+      <section id="welcome" class="welcome" aria-label="Des réponses vérifiables">
+        <span class="welcome-icon" aria-hidden="true">✳</span>
+        <h2>Le plaisir de trouver.<br><span>La possibilité de vérifier.</span></h2>
+        <p>Ouvrez les preuves d’un résultat pour découvrir les collaborations,<br>les extraits de synopsis et les thèmes qui l’expliquent.</p>
+        <div class="proof-key"><span><i class="key-dot relation-dot"></i>Relations vérifiées</span><span><i class="key-dot overview-dot"></i>Extraits de synopsis</span><span><i class="key-dot keyword-dot"></i>Thèmes annotés</span></div>
+      </section>
+    </main>
+
+    <footer class="site-footer"><span>MovieGraphRAG <span class="footer-separator">/</span> Explorer, relier, comprendre.</span><a href="/docs">Documentation API <span aria-hidden="true">↗</span></a><p>Données issues de TMDB. This product uses the TMDB API but is not endorsed or certified by TMDB.</p></footer>
+    <noscript><p class="noscript">Activez JavaScript pour poser une question. La <a href="/docs">documentation API</a> reste accessible.</p></noscript>
+  </div>
+</body>
+</html>

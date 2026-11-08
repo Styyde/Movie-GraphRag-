@@ -1,9 +1,11 @@
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 from threading import Event, Thread
 
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from moviegraphrag import __version__
 from moviegraphrag.config import Settings
@@ -56,6 +58,12 @@ def create_app(service=None):
 
     app = FastAPI(title="MovieGraphRAG", version=__version__, lifespan=lifespan,
                   description="Controlled graph and semantic retrieval with inspectable evidence.")
+    web = Path(__file__).resolve().parents[1] / "web"
+    app.mount("/static", StaticFiles(directory=web), name="static")
+
+    @app.get("/", include_in_schema=False)
+    def index():
+        return FileResponse(web / "index.html", headers={"Cache-Control": "no-cache"})
 
     @app.get("/health")
     def health():

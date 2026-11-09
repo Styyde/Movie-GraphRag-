@@ -269,6 +269,13 @@ effectivement répondu est consigné ; `latest` n'est pas une garantie de stabil
 
 ## vérification
 
+Pour tester toi-même les différentes étapes du RAG, consulter le
+[cahier de 24 tests manuels](docs/tests_manuels_rag.md) et sa
+[grille de résultats à remplir](docs/resultats_tests_manuels.csv).
+Il couvre retrieval, augmentation, génération et raisonnement sur le graphe,
+avec questions, résultats attendus, métriques et limites d’observabilité.
+Aucune installation n’est nécessaire et aucun de ces scénarios n’est lancé automatiquement.
+
 Les tests refusent de démarrer hors Docker. Aucune doublure de Neo4j, E5, HTTP ou
 Groq n'est utilisée. Les CSV manquants, un corpus non chargé ou une clé absente
 sont des erreurs, sans remplacement par des données simulées.

@@ -1,5 +1,9 @@
 # architecture
 
+Pour l’explication détaillée de l’implémentation et de chaque fichier, consulter le
+[dossier de soutenance](architecture_complete_soutenance.md) et sa
+[fiche de révision](fiche_revision_soutenance.md).
+
 ## ingestion
 
 ```mermaid

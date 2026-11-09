@@ -30,6 +30,14 @@ et Groq analyse les questions et les preuves thématiques dans un pipeline contr
 Une seule base conserve le graphe et les vecteurs. Le LLM produit un plan validé ;
 les requêtes Cypher proviennent de motifs autorisés et paramétrés.
 
+## comprendre le projet et préparer la soutenance
+
+Le [dossier d’architecture complet](docs/architecture_complete_soutenance.md) explique
+le rôle de chaque fichier, l’ingestion, le chunking, le retrieval, les preuves,
+la génération, le déploiement et les limites réellement observées.
+La [fiche de révision](docs/fiche_revision_soutenance.md) reprend le parcours d’une
+question, les distinctions essentielles et les questions possibles à l’oral.
+
 ## démarrage avec docker
 
 Prérequis : Docker Desktop démarré, environ 4 Go de mémoire disponibles pour les

@@ -1,92 +1,64 @@
-# architecture
+# Architecture de MovieGraphRAG
 
-Pour l’explication détaillée de l’implémentation et de chaque fichier, consulter le
-[dossier de soutenance](architecture_complete_soutenance.md) et sa
-[fiche de révision](fiche_revision_soutenance.md).
+Voir le [dossier complet](architecture_complete_soutenance.md) et la [fiche de révision](fiche_revision_soutenance.md).
 
-## ingestion
+## Ingestion
 
-```mermaid
+~~~mermaid
 flowchart TD
-  A[CSV] --> B[validation et jointure par ID]
-  B --> C[normalisation et crédits agrégés]
-  C --> D[graphe idempotent]
-  C --> E[document par film]
-  E --> F[tokenisation et E5 local]
-  D --> N[(Neo4j)]
-  F --> N
-  N --> G[index et contrôle du snapshot]
-```
+    CSV["CSV films et crédits"] --> V["Validation et jointure par ID"]
+    V --> N["Normalisation et agrégation"]
+    N --> G["Person, Movie, Genre et relations"]
+    N --> D["Un document par film"]
+    D --> E["E5 local : 384 dimensions"]
+    G --> DB[("Neo4j")]
+    E --> DB
+    DB --> M["Contrôles et manifeste ready"]
+~~~
 
-## questions
+Les relations viennent des champs structurés, pas des embeddings. Person porte les rôles par ACTED_IN et DIRECTED. Movie est relié à Genre par IN_GENRE ; ses keywords restent des propriétés. Corpus conserve le manifeste technique.
 
-```mermaid
+Un document titre + synopsis + genres + keywords par film, sans overlap. Contrôle réel de la fenêtre E5 de 512 tokens ; pas de troncature silencieuse du synopsis. Le snapshot contient 4 803 films et 4 801 embeddings.
+
+## Questions
+
+~~~mermaid
 flowchart TD
-  A[question] --> B[analyse structurée]
-  B --> C[validation et linking]
-  C --> D{résolu}
-  D -- non --> E[clarification]
-  D -- oui --> R[router déterministe]
-  R -- graph --> G[contraintes et témoins]
-  R -- vector --> V[index vectoriel]
-  R -- hybrid --> H[tous les candidats du graphe]
-  H --> S[scoring exact]
-  S --> P[preuves thématiques]
-  V --> P
-  P --> X[contexte]
-  G --> X
-  X --> Y[rendu ou synthèse contrôlée]
-```
+    Q["Question"] --> A["Analyse structurée Groq"]
+    A --> V["Validation du plan et de la quantité explicite"]
+    V --> E["Entity Linking et clarification"]
+    E --> R{"Opération"}
+    R -- count --> C["COUNT DISTINCT sans LIMIT"]
+    R -- list --> G["Contraintes puis pagination"]
+    R -- recommend --> S["Cosine exact : corpus ou candidats admissibles"]
+    S --> K["Top-k et sources documentaires"]
+    K --> CT["Contexte et chemins témoins"]
+    CT --> L["Synthèse contrôlée ou rendu déterministe"]
+    C --> O["Réponse et provenance"]
+    G --> O
+    L --> O
+~~~
 
-Le modèle métier compte Movie, Person, Genre et trois types de relations. Un nœud
-technique Corpus conserve le manifeste ; il n'est pas compté parmi les 61 426 nœuds métier.
+Le LLM fournit une intention déclarative, jamais des IDs TMDB ni du Cypher libre. Python compile des motifs autorisés, paramétrés, connectés et acycliques de quatre relations au plus.
 
-Le compilateur accepte uniquement des arbres connectés de quatre relations au plus,
-avec ancres et directions conformes au schéma. Les variables sont remplacées par
-des alias internes ; les valeurs sont toujours des paramètres.
+- COUNT : nombre exact de films/personnes distincts, y compris zéro pour une identité connue sans correspondance.
+- LIST : tous les candidats structurels, puis page déterministe et total.
+- RECOMMEND : scoring exact de tous les films encodés, ou de tous les films encodés admissibles en hybride ; score décroissant puis ID.
 
-La désambiguïsation ne recherche pas l'homonyme qui fournit une réponse. Elle utilise
-le nom exact, les rôles explicitement demandés et les films d'identification explicites.
-Une réponse vide ne supprime jamais de contrainte.
+Quantité explicite de la question prioritaire sur la limite de l'interface ; défaut cinq, maximum vingt avec avertissement. Le comptage ignore cette limite.
 
-L'index natif sert aux recherches thématiques pures. Pour l'hybride, le nombre de
-candidats du graphe n'est pas limité avant le scoring. Seule leur inspection LLM
-est bornée et cette couverture est exposée. Les preuves sont inspectables même si
-la génération échoue.
+Aucun appel d'appréciation thématique, plafond de cent inspections ou reranker dans cette version. L'index vectoriel est conservé mais n'intervient plus dans la sélection actuelle.
 
-Les valeurs initiales ne sont pas des garanties mesurées : 20 films par lot, 100
-films inspectés, 5 secondes par transaction de lecture, 24 000 caractères de contexte.
-Les résultats structurés ne sont pas tronqués quand le contexte de synthèse est limité.
+## Sources et garanties
 
-V2 : ingestion incrémentale, alias enrichis, motifs supplémentaires, benchmark des
-stratégies vector-first/parallèles et reranker seulement si un gain est démontré.
+Preuves relation, document et aggregate. Les documents sont vérifiés par identité, snapshot, modèle et hash ; cette intégrité ne certifie pas la pertinence thématique.
 
-## interface web
+Le contexte JSON conserve sources et références sous 24 000 caractères, sans vecteurs. Les listes et comptes sont déterministes ; la synthèse des recommandations peut utiliser Groq. Les références inconnues sont refusées, mais la fidélité sémantique reste à évaluer humainement.
 
-FastAPI sert la page `/` et les ressources `/static/`. Le frontend HTML, CSS et
-JavaScript natif appelle les endpoints sur la même origine ; aucun service web
-supplémentaire ni clé Groq côté navigateur n'est nécessaire. Les ressources sont
-incluses dans le package Python.
+Les comptes thématiques, exigences de centralité certifiée, négations et agrégations non prévues demandent une reformulation. Les recommandations ne constituent pas une liste thématique exhaustive.
 
-L'état de recherche reste en mémoire : question exacte, token de clarification,
-réponse et pages déjà consultées. Modifier la question ou la limite réinitialise
-cet état. Seule la stratégie GRAPH propose une pagination ; revenir sur une page
-en cache ne déclenche pas d'appel LLM. Le champ `type` des résultats distingue les
-films des personnes avant tout chargement de fiche film.
+## Exécution et vérification
 
-Les tokens signés conservent les choix déjà confirmés. Le serveur n'accepte que
-les nouveaux choix proposés, restaure les précédents et revalide leur contexte
-dans Neo4j. Un token expiré demande une relance explicite. Les valeurs sources sont
-rendues comme du texte et les citations ne ciblent que des preuves présentes.
+API et Neo4j restent dans leurs conteneurs, sans dépendance supplémentaire. Les tests utilisent exclusivement Docker et les services réels. Les parcours navigateur restent écrits mais non exécutés, leur installation ayant été interrompue.
 
-## validation réelle dans docker
-
-Les tests accèdent au serveur Neo4j, au modèle E5 et à l'API HTTP réellement exécutés
-dans les conteneurs. Le sous-ensemble `llm` appelle réellement Groq ; aucune
-simulation ni réponse de remplacement n'est utilisée. Un garde-fou pytest interdit
-les exécutions sur l'hôte. La validation sans clé couvre le graphe, l'ingestion,
-les embeddings et les endpoints de données, mais ne valide pas l'analyse LLM.
-
-Le service optionnel `browser-tests` vérifie l'interface avec Playwright et Chromium
-réels, via l'API, Neo4j et Groq. Son garde-fou vérifie également Docker. Il ne
-remplace aucune réponse réseau ; les captures et rapports restent dans `.runtime/browser/`.
+V2 : benchmark, puis reranker multilingue seulement si un gain est mesuré. Aucun reranker ne remplacera COUNT DISTINCT ni les contraintes obligatoires.

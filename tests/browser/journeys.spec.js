@@ -109,7 +109,8 @@ test("mobile hybrid journey preserves real evidence", async ({ page }) => {
   const proofs = new Map(body.evidence.map((item) => [item.id, item]));
   const kinds = new Set(body.results.flatMap((item) => item.evidence_ids.map((ref) => proofs.get(ref).kind)));
   expect(kinds.has("relation")).toBeTruthy();
-  expect(kinds.has("overview") || kinds.has("keyword")).toBeTruthy();
+  expect(kinds.has("document")).toBeTruthy();
+  expect(body.thematic_verification).toBe("not_performed");
   if (body.warnings.length) await expect(page.locator("#warnings")).not.toBeEmpty();
   await page.screenshot({ path: path.join(artifacts, "mobile-hybrid-evidence.png"), fullPage: true });
 });
@@ -164,4 +165,25 @@ test("real director pagination reuses cached previous page", async ({ page }) =>
     await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
     expect(requests, "Cached previous page must not trigger another analysis/Groq request").toEqual([]);
   } finally { page.removeListener("request", observe); }
+});
+
+test("exact count and explicit recommendation quantity", async ({ page }) => {
+  const count = await submit(page,
+    "Quel est le nombre d'acteurs ayant joué dans des films réalisés par Christopher Nolan ?", 5);
+  expect(count.status, JSON.stringify(count)).toBe("ok");
+  expect(count.operation).toBe("count");
+  expect(count.count).toBe(509);
+  expect(count.results).toEqual([]);
+  await expect(page.locator("#results-title")).toHaveText("Comptage exact");
+  await expect(page.locator("#results h3")).toHaveText("509");
+  await expect(page.locator("#answer-panel")).toBeVisible();
+  await expect(page.locator("#pagination")).toBeHidden();
+  await page.getByText("Provenance du comptage", { exact: true }).click();
+  await expect(page.locator("#proof-a-count")).toContainText(count.trace.snapshot_id);
+  const recommendations = await submit(page, "Recommande trois films sur l'intelligence artificielle.", 10);
+  expect(recommendations.status, JSON.stringify(recommendations)).toBe("ok");
+  expect(recommendations.results).toHaveLength(3);
+  expect(recommendations.coverage.scored).toBe(4801);
+  await assertCards(page, recommendations);
+  await expect(page.locator("#pagination")).toBeHidden();
 });

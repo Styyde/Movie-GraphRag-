@@ -10,7 +10,7 @@ const strategyNames = {
 const statusMessages = {
   entity_not_found: "Une personne, un film ou son contexte est absent de cette collection. Précisez le nom ou essayez un autre film.",
   no_match_in_dataset: "Aucun résultat dans cette collection ne satisfait les relations demandées.",
-  insufficient_evidence: "Les sources examinées ne suffisent pas à proposer un résultat pour ces thèmes.",
+  insufficient_evidence: "Les documents disponibles ne permettent pas de produire des recommandations sourcées.",
   unsupported: "Cette question ne peut pas encore être traitée. Essayez une collaboration, un genre ou un thème.",
   dependency_error: "Le service de recherche est momentanément indisponible. Vous pouvez réessayer dans un instant.",
 };
@@ -157,7 +157,7 @@ function evidenceNode(proof, number) {
   const item = element("section", "evidence-item");
   item.id = `proof-${proof.id}`;
   item.dataset.kind = proof.kind;
-  const labels = { relation: "Relation vérifiée", overview: "Extrait du synopsis", keyword: "Thème annoté" };
+  const labels = { relation: "Relation vérifiée", document: "Document source", aggregate: "Comptage exact" };
   item.append(element("p", "evidence-kind", labels[proof.kind] || "Source"));
   const source = proof.data;
   if (proof.kind === "relation") {
@@ -169,18 +169,20 @@ function evidenceNode(proof, number) {
       seen.add(sentence);
     }
     item.append(element("p", "evidence-note", "Relation issue des crédits ou des genres du dataset. Les films cités constituent les témoins de collaboration."));
-  } else if (proof.kind === "overview") {
-    item.append(element("p", "", `Thème : ${source.theme}`));
-    const quote = element("blockquote", "", source.quote);
+  } else if (proof.kind === "document") {
+    item.append(element("p", "", source.title));
+    const quote = element("blockquote", "", source.overview || "Synopsis absent ; document fondé sur les métadonnées.");
     quote.lang = "en";
     item.append(quote);
-    const centrality = { central: "Ce thème apparaît central dans le synopsis disponible.", peripheral: "Ce thème apparaît secondaire dans le synopsis disponible.", unknown: "La centralité de ce thème n’est pas établie par le synopsis disponible." };
-    item.append(element("p", "evidence-note", centrality[source.centrality] || centrality.unknown));
-  } else if (proof.kind === "keyword") {
-    item.append(element("p", "", `Thème : ${source.theme}`));
     const keywords = element("ul", "keyword-list");
     for (const keyword of source.keywords || []) keywords.append(element("li", "", keyword.name));
-    item.append(keywords, element("p", "evidence-note", "Ces keywords attestent une association annotée. Ils ne démontrent pas que le thème est central."));
+    item.append(keywords, element("p", "evidence-note", "Sources du dataset. La pertinence thématique et la centralité ne sont pas certifiées par le classement."));
+  } else if (proof.kind === "aggregate") {
+    item.append(element("p", "", `${source.value} entité(s) distincte(s), calculées dans Neo4j sur tout l’ensemble correspondant.`));
+    item.append(element("p", "evidence-note", `Motif : ${source.template_id}. Snapshot : ${source.snapshot_id}.`));
+    for (const [name, hash] of Object.entries(source.source_hashes || {})) {
+      item.append(element("p", "evidence-note", `${name} : ${hash}`));
+    }
   }
   item.append(element("small", "proof-ref", `[${number}] · Référence ${proof.id}`));
   return item;
@@ -252,27 +254,39 @@ function renderResults(data) {
   $("#results-section").hidden = false;
   $("#strategy-label").textContent = strategyNames[data.strategy] || "Recherche";
   $("#strategy-label").hidden = !data.strategy;
-  $("#results-title").textContent = data.results.length ? "Vos résultats" : "Aucun résultat à afficher";
+  const isCount = data.operation === "count" && data.count !== null;
+  $("#results-title").textContent = isCount ? "Comptage exact" : data.results.length ? "Vos résultats" : "Aucun résultat à afficher";
   const warnings = $("#warnings");
   warnings.replaceChildren();
   for (const warning of data.warnings) warnings.append(element("p", "", warning));
   warnings.hidden = data.warnings.length === 0;
   const proofs = new Map(data.evidence.map((proof) => [proof.id, proof]));
   const proofNumbers = new Map(data.evidence.map((proof, index) => [proof.id, index + 1]));
-  $("#answer-panel").hidden = !data.answer || data.results.length === 0;
+  $("#answer-panel").hidden = !data.answer;
   renderAnswer(data.answer || "", proofNumbers);
   const coverage = data.coverage;
-  if (data.strategy === "GRAPH") {
+  if (isCount) {
+    $("#coverage").textContent = "Comptage de l’ensemble correspondant dans ce dataset, sans limite d’affichage ni recherche vectorielle.";
+  } else if (data.operation === "list") {
     $("#coverage").textContent = data.results.length
       ? `${coverage.offset + 1}–${coverage.offset + data.results.length} sur ${coverage.total_candidates} résultat${coverage.total_candidates > 1 ? "s" : ""} vérifié${coverage.total_candidates > 1 ? "s" : ""}.`
       : "";
   } else if (data.strategy) {
     const structural = data.strategy === "HYBRID_GRAPH_FIRST" ? `${coverage.total_candidates} film(s) satisfont les relations. ` : "";
-    const partial = coverage.semantic_coverage === "partial" || coverage.approximate;
-    $("#coverage").textContent = `${structural}${coverage.returned} proposition(s), ${coverage.examined} candidat(s) examinés pour les thèmes. ${partial ? "Sélection partielle, sans garantie d’exhaustivité." : "Les candidats disponibles ont été examinés."}`;
+    $("#coverage").textContent = `${structural}${coverage.scored} film(s) scorés exactement, ${coverage.returned} recommandation(s). ${coverage.without_embedding} film(s) sans embedding. La pertinence thématique n’est pas certifiée.`;
   } else $("#coverage").textContent = "";
   const results = $("#results");
   results.replaceChildren();
+  if (isCount) {
+    const card = element("article", "result-card");
+    card.append(element("h3", "", new Intl.NumberFormat("fr-FR").format(data.count)));
+    card.append(element("p", "result-type", "Résultats distincts dans le dataset"));
+    const details = element("details", "evidence-details");
+    details.append(element("summary", "", "Provenance du comptage"));
+    for (const proof of data.evidence) details.append(evidenceNode(proof, proofNumbers.get(proof.id)));
+    card.append(details);
+    results.append(card);
+  }
   data.results.forEach((result, index) => {
     const card = element("article", "result-card");
     card.dataset.entityId = String(result.id);
@@ -282,15 +296,8 @@ function renderResults(data) {
     name.append(element("h3", "", result.name), element("p", "result-type", result.type === "Movie" ? "Film" : "Personne"));
     header.append(element("span", "result-number", String(coverage.offset + index + 1).padStart(2, "0")), name);
     card.append(header);
-    if (result.judgments?.length) {
-      const themes = element("div", "theme-list");
-      for (const judgment of result.judgments) {
-        if (judgment.source === "none") continue;
-        const centrality = judgment.centrality === "central" ? "central selon le synopsis" : judgment.centrality === "peripheral" ? "secondaire selon le synopsis" : "centralité non établie";
-        const source = judgment.source === "keyword" ? "thème annoté" : judgment.source === "both" ? "synopsis et annotation" : "appui du synopsis";
-        themes.append(element("span", "theme-badge", `${judgment.theme} · ${source} · ${centrality}`));
-      }
-      card.append(themes);
+    if (result.score !== undefined) {
+      card.append(element("p", "evidence-note", `Similarité : ${Number(result.score).toFixed(4)} · classement, pas probabilité de pertinence.`));
     }
     const details = element("details", "evidence-details");
     details.append(element("summary", "", "Pourquoi ce résultat ?"));
@@ -301,11 +308,12 @@ function renderResults(data) {
     if (result.type === "Movie") card.append(movieDetails(result));
     results.append(card);
   });
-  $("#pagination").hidden = data.strategy !== "GRAPH" || (!coverage.has_more && coverage.offset === 0);
-  const limit = state.lastRequest?.limit || Number($("#limit").value);
+  $("#pagination").hidden = data.operation !== "list" || (!coverage.has_more && coverage.offset === 0);
+  const limit = coverage.effective_limit || Number($("#limit").value);
   $("#page-label").textContent = `Page ${Math.floor(coverage.offset / limit) + 1}`;
   $("#trace-label").textContent = data.trace_id ? `Référence de recherche : ${data.trace_id}` : "";
-  status(data.status === "ok" ? `${data.results.length} résultat${data.results.length > 1 ? "s" : ""} affiché${data.results.length > 1 ? "s" : ""}.` : statusMessages[data.status] || data.answer, data.status === "dependency_error");
+  const message = isCount ? `Comptage terminé : ${data.count}.` : `${data.results.length} résultat${data.results.length > 1 ? "s" : ""} affiché${data.results.length > 1 ? "s" : ""}.`;
+  status(data.status === "ok" ? message : data.answer || statusMessages[data.status], data.status === "dependency_error");
   $("#results-title").focus();
 }
 
@@ -328,7 +336,11 @@ async function search(payload) {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
     });
     state.lastRequest = payload;
-    if (data.status === "ok" && data.strategy === "GRAPH") state.pages.set(payload.offset, { data, payload });
+    if (data.status === "ok" && data.operation === "list") {
+      // Reuse the signed plan on subsequent pages: no new LLM interpretation.
+      state.lastRequest = { ...payload, clarification_token: data.clarification_token, selections: {} };
+      state.pages.set(payload.offset, { data, payload: state.lastRequest });
+    }
     render(data);
   } catch (error) {
     status(error.message, true);
@@ -386,9 +398,9 @@ $("#clarification-form").addEventListener("submit", (event) => {
 });
 
 function changePage(direction) {
-  if (state.busy || state.response?.strategy !== "GRAPH") return;
+  if (state.busy || state.response?.operation !== "list") return;
   const previous = state.lastRequest;
-  const offset = Math.max(0, state.response.coverage.offset + direction * previous.limit);
+  const offset = Math.max(0, state.response.coverage.offset + direction * state.response.coverage.effective_limit);
   const cached = state.pages.get(offset);
   if (cached) {
     state.lastRequest = cached.payload;

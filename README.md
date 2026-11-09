@@ -4,12 +4,13 @@ Explorez **4 803 films** en français : collaborations entre acteurs et réalisa
 genres et thèmes des synopsis. Chaque résultat donne accès aux sources qui l'expliquent.
 
 Neo4j vérifie les relations, les embeddings multilingues E5 classent les candidats,
-et Groq analyse les questions et les preuves thématiques dans un pipeline contrôlé.
+et Groq analyse les questions puis peut rédiger les recommandations dans un pipeline contrôlé.
 
 ## fonctionnalités
 
 - Interface responsive en français : recherche, exemples, résultats et fiches de film.
 - Recherche relationnelle, thématique ou hybride avec contraintes obligatoires.
+- Comptage exact des films, personnes, acteurs et réalisateurs avec `COUNT DISTINCT`.
 - Désambiguïsation des personnes et des titres, avec confirmation explicite.
 - Preuves consultables : crédits, chemins de collaboration, extraits et keywords.
 - Pagination des listes relationnelles et couverture explicite des recherches thématiques.
@@ -100,7 +101,7 @@ demande de l'utilisateur et leurs parcours ne sont pas validés.
 | `NEO4J_USER`, `NEO4J_PASSWORD`, `NEO4J_DATABASE` | Connexion au graphe. |
 | `EMBEDDING_MODEL`, `EMBEDDING_REVISION` | Modèle local et révision du snapshot vectoriel. |
 | `SYNTHESIS_ENABLED` | Active la synthèse LLM française après sélection des preuves. |
-| `SEMANTIC_BUDGET`, `EVIDENCE_BATCH_SIZE` | Maximum de candidats examinés et taille des lots. |
+| `CONTEXT_CHAR_BUDGET` | Budget du contexte JSON, en caractères. |
 | `LLM_INPUT_USD_PER_MILLION`, `LLM_OUTPUT_USD_PER_MILLION` | Tarifs facultatifs pour estimer le coût des traces. |
 
 Les valeurs initiales figurent dans [.env.example](.env.example). Compose configure
@@ -115,9 +116,9 @@ HTML, CSS et JavaScript natif : aucun serveur frontend supplémentaire à lancer
 Les ressources statiques sont aussi incluses dans le package Python installé.
 
 - Poser une question ou sélectionner un des trois exemples, puis cliquer sur **Explorer**.
-- Choisir 5, 10 ou 20 résultats. L'indicateur **Prêt à explorer** confirme la disponibilité.
+- Choisir 5, 10 ou 20 résultats. Une quantité explicitement demandée dans la question est prioritaire, avec un plafond de 20. L'indicateur **Prêt à explorer** confirme la disponibilité.
 - Ouvrir **Pourquoi ce résultat ?** pour vérifier les collaborations, les extraits
-  du synopsis et les keywords cités. Les annotations thématiques ne prouvent pas la centralité.
+  du synopsis et les keywords sources. Le classement ne certifie ni la pertinence thématique ni la centralité.
 - Ouvrir **Détails du film** pour charger les données sources à la demande.
 - Confirmer les identités proposées lorsqu'un nom est ambigu. Les choix déjà
   confirmés sont conservés lors des clarifications suivantes.
@@ -166,12 +167,24 @@ Invoke-RestMethod -Method Post -Uri http://localhost:8000/questions `
 une clé LLM configurée et le modèle chargé dans le processus API. Un worker de démarrage
 charge le modèle après la disponibilité du corpus ; `/ready` ne déclenche aucun téléchargement.
 Une clé configurée ne prouve pas que le compte dispose de crédits.
+L’analyse autorise une correction de schéma. Si Groq refuse son propre JSON,
+cette correction utilise le mode JSON objet avec validation Pydantic côté application.
+Les reprises réseau respectent les délais du fournisseur et restent bornées.
 
 Pour une clarification, renvoyer exactement la même question avec le
 `clarification_token` reçu et `selections: {"reference_de_mention": 123}`.
 Les IDs doivent provenir des candidats proposés. Les jetons expirent après 30 minutes
 et sont invalidés au redémarrage de l'API. Les questions graphe acceptent `offset` ;
 les recommandations sémantiques n'ont pas de pagination exhaustive.
+Les listes retournent aussi un plan signé dans clarification_token ; le frontend le
+réutilise pour les pages suivantes, sans nouvelle interprétation par Groq.
+
+La réponse distingue `operation: list | count | recommend`. Un comptage retourne
+`count`, une preuve `aggregate` et une liste `results` vide ; zéro est un compte
+valide pour une identité connue sans crédit correspondant. `limit` ne borne jamais
+le comptage. Les recommandations retournent `thematic_verification: not_performed`.
+La couverture expose `scored`, `sources_checked`, `without_embedding`,
+`ranking_coverage` et `effective_limit` ; elle ne prétend pas vérifier les thèmes.
 
 Une réponse HTTP 200 peut signaler `needs_clarification`, `entity_not_found`,
 `no_match_in_dataset`, `insufficient_evidence`, `unsupported` ou `dependency_error`.
@@ -198,6 +211,11 @@ Le modèle du graphe est `Person → ACTED_IN / DIRECTED → Movie → IN_GENRE 
 Les keywords sont conservés sur les films. En hybride, le graphe sélectionne tous
 les films admissibles avant le calcul de similarité exacte. Les détails figurent
 dans [la documentation d'architecture](docs/architecture.md).
+
+Le parcours thématique pur calcule lui aussi la similarité exacte sur tous les
+documents encodés : 4 801 dans ce snapshot. L’index vectoriel reste présent pour
+compatibilité et expérimentation ; il n’est plus utilisé par ce parcours.
+Aucun appel d’appréciation thématique ni reranker ne se trouve entre E5 et le contexte.
 
 ```text
 moviegraphrag/
@@ -257,13 +275,13 @@ docker compose down
 
 - Graph : tous les candidats sont déterminés avant pagination.
 - Hybride : toutes les contraintes sont appliquées avant le scoring cosine exact.
-- Vectoriel pur : top approximatif de l'index natif, sans promesse d'exhaustivité.
-- Vérification thématique : lots de 20, maximum 100 candidats, puis couverture explicite.
-- Un keyword atteste une association annotée ; seul le synopsis peut étayer une centralité.
-- Les citations sont vérifiées contre les champs sources ; l'implication sémantique
+- Vectoriel pur : similarité exacte sur tous les documents encodés, sans plafond de cent.
+- Aucun appel d'appréciation thématique ni reranker ; la pertinence reste estimée.
+- Les demandes de centralité certifiée et les comptes thématiques exigent une reformulation.
+- Les documents et les références sont contrôlés ; l'implication sémantique
   et la fidélité de la synthèse nécessitent toujours une évaluation humaine.
 - Les homonymes non résolus et les fautes fuzzy demandent une clarification.
-- Les traductions de titres absentes, négations, agrégations et similarités à un film
+- Les traductions de titres absentes, négations, agrégations autres que les comptes prévus et similarités à un film
   de référence sont hors MVP ; l'analyseur doit les déclarer non prises en charge.
 - Une interprétation LLM valide syntaxiquement peut rester erronée. Voir les tests et l'évaluation.
 - Pas de reconstruction destructive automatique. Un autre snapshot demande une base dédiée vide.
@@ -278,7 +296,7 @@ effectivement répondu est consigné ; `latest` n'est pas une garantie de stabil
 ## vérification
 
 Pour tester toi-même les différentes étapes du RAG, consulter le
-[cahier de 24 tests manuels](docs/tests_manuels_rag.md) et sa
+[cahier de 29 tests manuels](docs/tests_manuels_rag.md) et sa
 [grille de résultats à remplir](docs/resultats_tests_manuels.csv).
 Il couvre retrieval, augmentation, génération et raisonnement sur le graphe,
 avec questions, résultats attendus, métriques et limites d’observabilité.

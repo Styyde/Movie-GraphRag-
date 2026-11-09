@@ -96,6 +96,7 @@ GROUPS = {
 
 def main():
     from moviegraphrag.evaluation import graph_suite_reference, preserve_annotations, validate_cases
+    from moviegraphrag.quantities import requires_centrality
 
     root = Path(__file__).parent
     output = root / "cases.jsonl"
@@ -123,6 +124,8 @@ def main():
             case.update(expected_status="unsupported", expected_status_source="architecture_policy")
         elif case["id"] == "robustness-04":
             case.update(expected_status="needs_clarification", expected_status_source="fuzzy_linking_policy")
+        elif requires_centrality(case["question"]):
+            case.update(expected_status="unsupported", expected_status_source="architecture_policy")
     cases = preserve_annotations(cases, previous)
     validate_cases(cases, next(iter(references.values()))["snapshot_id"])
     output.write_text("\n".join(json.dumps(c, ensure_ascii=False) for c in cases) + "\n", encoding="utf-8")

@@ -1,657 +1,348 @@
 # MovieGraphRAG — architecture complète pour la soutenance
 
-Ce dossier décrit **le code réellement présent dans le dépôt**, ses choix et ses
-limites. Il complète le README et le cahier de tests manuels. Sa préparation ne
-modifie pas l’application, n’installe rien et ne lance pas de nouveaux tests.
+Ce document décrit la version adaptée : **comptages exacts, listes relationnelles et recommandations classées par E5**. Groq analyse les questions et peut rédiger les recommandations ; il ne réexamine plus les candidats pour leur attribuer un jugement thématique.
 
-Pour réviser rapidement : commencer par la [fiche de révision](fiche_revision_soutenance.md),
-puis lire les sections 1, 5, 8, 10 et 11 de ce document.
+Lire aussi la [fiche de révision](fiche_revision_soutenance.md) et le [cahier manuel](tests_manuels_rag.md). Les descriptions antérieures avec un plafond de 100 inspections et un Evidence Assessor concernent l'ancienne version.
 
-## 1. Présenter le projet en une minute
+## 1. Présenter le projet
 
-> MovieGraphRAG permet de poser des questions en français sur les films du dataset
-> TMDB 5000. Il combine un graphe de personnes, films et genres avec une recherche
-> sémantique sur les synopsis. Le graphe vérifie les collaborations et les contraintes
-> obligatoires. Les embeddings recherchent les thèmes. Un LLM analyse la question,
-> apprécie les preuves thématiques et peut rédiger une synthèse. Les résultats restent
-> accompagnés de leurs sources et de leur couverture.
+> MovieGraphRAG permet d'interroger TMDB 5000 en français. Le graphe Neo4j vérifie les relations entre personnes, films et genres, et calcule les comptages. E5 multilingue classe les films par proximité avec les thèmes demandés. Les sources et les chemins de collaboration alimentent un contexte structuré pour une synthèse éventuelle via Groq. La pertinence thématique n'est pas certifiée par le classement.
 
-Les trois lettres de RAG désignent ici :
+Les responsabilités du RAG sont :
+- Retrieval : trouver les identités, appliquer les contraintes et classer les documents.
+- Augmentation : assembler résultats, données sources, chemins et couverture.
+- Generation : rendre une réponse déterministe ou une synthèse LLM avec références.
 
-- **Retrieval** : rechercher les entités, films et relations utiles.
-- **Augmentation** : réunir question, résultats et preuves dans un contexte structuré.
-- **Generation** : produire la réponse, par rendu déterministe ou synthèse LLM selon le parcours.
-
-Ce projet utilise un **pipeline contrôlé**. Les fonctions Python fixent l’ordre des
-étapes ; le LLM ne choisit pas librement des outils ni des requêtes exécutables.
-Le graphe est construit à partir des crédits TMDB structurés, sans extraction des
-relations par un LLM et sans entraînement d’un réseau de neurones sur le graphe.
+C'est un pipeline contrôlé, pas un agent autonome. Le LLM n'exécute aucun outil librement et ne génère pas de Cypher exécutable. Aucun modèle n'est entraîné sur TMDB.
 
 ## 2. Architecture globale
 
-```mermaid
-flowchart TB
-    U["Utilisateur / navigateur"] --> WEB["Frontend HTML CSS JavaScript"]
-    WEB --> API["FastAPI : POST /questions"]
-    API --> ORCH["MovieGraphRAG : pipeline contrôlé"]
-    ORCH --> LLM["Groq : analyse, thèmes, synthèse"]
-    ORCH --> EMB["E5 multilingue local sur CPU"]
-    ORCH --> DB[("Neo4j : graphe + vecteurs + index")]
-    DB --> ORCH
-    EMB --> ORCH
-    LLM --> ORCH
+~~~mermaid
+flowchart TD
+    CSV["CSV films et crédits"] --> ING["Validation, jointure et normalisation"]
+    ING --> GRAPH["Nœuds et relations"]
+    ING --> DOC["Document par film"]
+    DOC --> E5["E5 local sur CPU"]
+    GRAPH --> DB[("Neo4j")]
+    E5 --> DB
+    USER["Navigateur HTML CSS JavaScript"] --> API["FastAPI"]
+    API --> ORCH["Pipeline Python contrôlé"]
+    ORCH --> GROQ["Groq : analyse et synthèse éventuelle"]
+    ORCH --> DB
+    ORCH --> E5
     ORCH --> API
-    API --> WEB
+    API --> USER
+~~~
 
-    CSV["Deux CSV TMDB"] --> CLI["CLI : validation et ingestion"]
-    CLI --> DB
-    CLI --> EMB
-    CACHE["Cache local des poids du modèle"] --- EMB
-```
-
-### Répartition des responsabilités
-
-| Couche | Technologie | Responsabilité |
+| Couche | Technologie | Rôle |
 | --- | --- | --- |
-| Présentation | HTML, CSS, JavaScript natif | Question, résultats, clarification, preuves et fiches de film. |
-| Transport | FastAPI, Uvicorn | Routes HTTP, validation des requêtes et sérialisation JSON. |
-| Application | Fonctions Python, `orchestration.py` | Enchaîner les étapes et gérer budgets, erreurs et statuts. |
-| Contrats | Pydantic v2 | Décrire les objets échangés et vérifier leurs invariants. |
-| Stockage et retrieval | Neo4j Community 5.26.0 | Relations, index textuels, vecteurs et chemins témoins. |
-| Représentation sémantique | Sentence Transformers, E5 | Transformer textes et questions en vecteurs locaux. |
-| Inférence distante | API Groq | Analyse structurée, appréciation thématique et synthèse éventuelle. |
-| Exécution | Docker Compose | Conserver les services, leur réseau et leurs volumes. |
+| Interface | HTML, CSS, JavaScript natif | Questions, comptes, cartes, preuves, clarification et pagination. |
+| API | Python 3.12, FastAPI, Pydantic v2 | Contrats HTTP, validation et sérialisation. |
+| Application | orchestration.py | Opérations, limites, retrieval, contexte et erreurs. |
+| Stockage | Neo4j Community 5.26.0 | Graphe, documents, vecteurs et index. |
+| Embeddings | intfloat/multilingual-e5-small | Encodage local, 384 dimensions, fenêtre 512 tokens. |
+| LLM | API Groq, modèle configurable | Analyse structurée et rédaction ; aucune appréciation intermédiaire. |
+| Exécution | Docker Compose | API et Neo4j persistants ; services de tests optionnels. |
 
-Deux services fonctionnent pour l’application : **API et Neo4j**. Le frontend est
-servi par l’API ; il n’a pas besoin de serveur Node ou React. Les services `tests`
-et `browser-tests` sont optionnels et réservés au profil Compose `test`.
+Le frontend est servi par FastAPI. Aucun serveur Node n'est nécessaire à l'application. Les dépendances et poids déjà installés suffisent à cette adaptation.
 
-Le modèle Groq configuré lors de la lecture est `qwen/qwen3.8-27b`. Groq est le
-fournisseur d’inférence ; Qwen est le modèle demandé. Le modèle d’embeddings est
-distinct : `intfloat/multilingual-e5-small`, exécuté dans le conteneur API.
+## 3. Modèle du graphe et données
 
-## 3. Données et modèle du graphe
-
-### 3.1 Sources et chiffres vérifiés
-
-| Élément | Valeur | Conséquence |
-| --- | --- | --- |
-| Films | 4 803 | Corpus statique de taille modeste. |
-| Personnes acteurs/réalisateurs | 56 603 | Identité fondée sur les IDs TMDB. |
-| Genres | 20 | Petit vocabulaire structuré. |
-| Crédits de casting bruts | 106 257 | Plusieurs crédits peuvent concerner le même couple personne–film. |
-| Couples acteur–film distincts | 106 084 | Une relation agrégée par couple. |
-| Relations réalisateur–film | 5 166 | Plusieurs réalisateurs possibles pour un film. |
-| Relations film–genre | 12 160 | Un film peut appartenir à plusieurs genres. |
-| Noms exacts associés à plusieurs IDs | 405 | Clarification ou désambiguïsation contextuelle nécessaire. |
-| Noms normalisés ambigus | 420 | Enlever les accents peut créer des collisions supplémentaires. |
-| Personnes à la fois acteurs et réalisateurs | 563 | Un seul nœud Person avec plusieurs relations de rôle. |
-| Films à plusieurs réalisateurs | 308 | Ne pas réduire un film à un réalisateur unique. |
-| Synopsis non vides : médiane / maximum | 48 / 175 mots | Documents courts, adaptés à une unité par film. |
-| Synopsis absents | 4 | Couverture sémantique explicitement incomplète. |
-
-Ces données figurent dans `data/reports/profile.json`. Les champs « personnes »
-concernent les acteurs et réalisateurs ingérés ; les autres métiers du crew ne
-sont pas tous transformés en nœuds métier.
-
-### 3.2 Schéma
-
-```mermaid
+~~~mermaid
 flowchart LR
-    P["Person<br/>person_id, name, normalized_name, surname"]
-    M["Movie<br/>movie_id, title, overview, keywords, embedding"]
-    G["Genre<br/>genre_id, name"]
-    C["Corpus technique<br/>name=tmdb, manifeste JSON"]
-    P -->|ACTED_IN| M
+    P["Person : identité"] -->|ACTED_IN| M["Movie : données et embedding"]
     P -->|DIRECTED| M
-    M -->|IN_GENRE| G
-```
+    M -->|IN_GENRE| G["Genre"]
+    C["Corpus : manifeste technique"]
+~~~
 
-Le nœud Corpus conserve le manifeste. Il ne possède pas de relation métier.
-On compte **61 426 nœuds métier**, plus ce nœud technique, et **123 410 relations métier**.
+Acteur et réalisateur sont des rôles portés par les relations d'une même Person. Une personne à deux rôles n'est pas dupliquée. Corpus est isolé du graphe métier.
 
-| Objet | Propriétés importantes |
+| Élément | Volumes du snapshot |
 | --- | --- |
-| Movie | ID, titre et titre original, synopsis, date/année, langue, notes, noms/IDs de keywords, genres, snapshot, document, vecteur et métadonnées d’encodage. |
-| Person | ID, nom, nom normalisé, patronyme et liste d’alias initialement vide. |
-| Genre | ID, nom et nom normalisé. |
-| ACTED_IN | IDs personne/film, personnages, ordre minimum, crédits sérialisés et snapshot. |
-| DIRECTED | IDs personne/film, crédits sérialisés et snapshot. |
-| IN_GENRE | Identifiants du film et du genre. |
-| Corpus | Manifeste : hashes, volumes, état, modèle, révision et couverture. |
+| Movie | 4 803 |
+| Person acteurs/réalisateurs | 56 603 |
+| Genre | 20 |
+| Nœuds métier | 61 426, plus un Corpus technique |
+| ACTED_IN | 106 084 couples distincts, issus de 106 257 crédits |
+| DIRECTED | 5 166 |
+| IN_GENRE | 12 160 |
+| Relations métier | 123 410 |
+| Noms exacts ambigus / noms normalisés ambigus | 405 / 420 |
+| Personnes acteurs et réalisateurs | 563 |
+| Films à plusieurs réalisateurs | 308 |
+| Synopsis : médiane / maximum non vide | 48 / 175 mots |
+| Synopsis absents | 4 |
+| Documents encodés | 4 801 : deux metadata_only et deux films sans vecteur |
 
-Les keywords sont des **propriétés de Movie**, pas des nœuds. Ils servent surtout
-à enrichir les documents et fournir des annotations thématiques. Les genres sont
-des nœuds parce qu’ils participent aux motifs structurels interrogés.
+Les chiffres concernent ce corpus statique. L'absence dans TMDB 5000 ne démontre pas l'inexistence d'un film ou d'une collaboration dans le monde.
 
-### 3.3 Pourquoi conserver tous les crédits d’un couple ?
+### Propriétés des nœuds et relations
 
-Une personne peut être créditée plusieurs fois dans un film, par exemple pour
-plusieurs personnages. `dataset.py` regroupe ces crédits dans une même relation
-sans choisir arbitrairement une ligne. Les structures complexes sont sérialisées
-dans `credits_json`, et les personnages sont aussi disponibles sous forme de liste.
+| Objet | Contenu |
+| --- | --- |
+| Movie, identité | movie_id, title, original_title, normalized_title, aliases. |
+| Movie, sources | overview, release_date, release_year, original_language, vote_average, vote_count, keywords, keyword_ids, unnamed_keyword_ids, genre_names. |
+| Movie, traçabilité | snapshot_id, overview_missing, document_text, document_hash, document_version, text_coverage, token_count, keywords_removed. |
+| Movie, représentation | embedding, embedding_model, embedding_revision. |
+| Person | person_id, name, normalized_name, surname, aliases initialement vides. |
+| Genre | genre_id, name, normalized_name. |
+| Corpus | name=tmdb, manifest sérialisé en JSON. |
+| ACTED_IN | person_id, movie_id, characters, min_order, credits_json, snapshot_id. |
+| DIRECTED | person_id, movie_id, credits_json, snapshot_id. |
+| IN_GENRE | movie_id, genre_id. |
 
-La collaboration acteur–réalisateur n’est pas une relation matérialisée entre deux
-personnes. Elle se déduit d’un film commun :
+Les personnages sont sur ACTED_IN car ils dépendent du couple personne–film. Les keywords sont des propriétés ; les genres sont des nœuds car ils participent aux motifs. Le casting et les réalisateurs se retrouvent par les relations, pas par des listes de noms stockées sur Movie.
 
-```text
+La collaboration se déduit d'un film commun :
+~~~text
 acteur ─ACTED_IN→ film ←DIRECTED─ réalisateur
-```
+~~~
 
-### 3.4 Index et contraintes
+### Index
 
-`Neo4jStore.setup()` exécute la liste `SCHEMA` de `neo4j_store.py` :
+Contraintes uniques sur les IDs et Corpus.name ; index de noms/titres normalisés, patronymes, full-text personnes et films. L'index vectoriel de 384 dimensions reste présent mais le parcours actuel utilise un calcul exact des similarités, pas sa recherche approximative.
 
-- unicité des IDs Movie, Person et Genre, et du nom du Corpus ;
-- index sur noms normalisés, patronymes, titres normalisés et genres ;
-- index full-text séparés pour personnes et films ;
-- index vectoriel `movie_embeddings`, dimension 384, similarité cosine.
+La liste complète exécutée est SCHEMA dans retrieval/neo4j_store.py. cypher/schema.cypher est une référence partielle.
 
-**Attention à l’oral :** `cypher/schema.cypher` est une référence lisible et partielle.
-Le fichier chargé à l’exécution pour créer les index est le code de `neo4j_store.py`.
+## 4. Ingestion des CSV
 
-## 4. Ingestion : des CSV au corpus prêt
-
-```mermaid
+~~~mermaid
 flowchart TD
-    A["tmdb_5000_movies.csv + tmdb_5000_credits.csv"] --> B["load_dataset : validation et jointure par ID"]
-    B --> C["Normalisation des films, personnes, genres et crédits"]
-    C --> D["Manifeste : hashes et snapshot_id"]
-    D --> E["État loading, contraintes et MERGE par lots"]
-    C --> F["build_document : un document par film"]
-    F --> G["Tokenizer : contrôle de la fenêtre E5"]
-    G --> H["Réutiliser les vecteurs compatibles ou encoder"]
-    E --> N[(Neo4j)]
-    H --> N
-    N --> I["Contrôler volumes, index et couverture"]
-    I --> J["Manifeste ready"]
-```
+    A["Deux CSV"] --> B["Validation des colonnes, IDs et JSON"]
+    B --> C["Jointure movies.id = credits.movie_id"]
+    C --> D["Normalisation et agrégation des crédits"]
+    D --> E["MERGE des nœuds et relations"]
+    D --> F["Construction des documents"]
+    F --> G["Contrôle des tokens et encodage E5"]
+    E --> N[("Neo4j")]
+    G --> N
+    N --> H["Contrôle des volumes, index, couverture"]
+    H --> I["Manifeste ready"]
+~~~
 
-### Étapes exactes
+1. Lecture CSV avec validation des colonnes, lignes et IDs uniques positifs.
+2. Égalité des ensembles d'IDs ; les titres sont contrôlés mais ne servent pas de clé.
+3. Décodage des tableaux JSON cast, crew, genres et keywords.
+4. Les personnes du cast créent ACTED_IN ; les membres du crew dont job=Director créent DIRECTED.
+5. Agrégation par couple personne–film, conservation des crédits et normalisation Unicode des noms.
+6. Hashes SHA-256 des CSV et version de normalisation pour identifier le snapshot.
+7. Manifeste loading, contraintes, puis MERGE par lots de 500.
+8. Documents et embeddings nouveaux ou réutilisés selon hash, version, modèle, révision et dimension.
+9. Contrôle des volumes et de la couverture avant passage à ready.
 
-1. `read_csv()` vérifie les colonnes nécessaires, les lignes et l’unicité des IDs.
-2. `load_dataset()` exige les mêmes ensembles d’IDs dans les deux fichiers.
-   La jointure utilise `movies.id = credits.movie_id`. Les titres sont contrôlés
-   comme cohérence supplémentaire, sans servir de clé de rapprochement.
-3. Les tableaux JSON de cast, crew, genres et keywords sont décodés avec `json.loads`.
-4. Les réalisateurs sont les personnes dont `job == "Director"` dans le crew.
-5. Les noms sont normalisés ; les rôles et crédits sont agrégés.
-6. Les hashes SHA-256 des deux CSV et une version de normalisation déterminent
-   le `snapshot_id`.
-7. `ingest()` crée les contraintes, écrit un manifeste `loading`, puis charge les objets avec `MERGE`.
-8. Le texte de chaque film est construit et tokenisé. Les documents compatibles
-   déjà encodés sont réutilisés ; les autres sont encodés sur CPU.
-9. Les vecteurs et leurs métadonnées sont écrits sur Movie.
-10. Les index sont attendus, puis les volumes et le nombre de documents encodés
-    sont vérifiés. Le manifeste passe à `ready` après ces contrôles.
+L'adaptation du retrieval réutilise ce graphe et ces vecteurs. Elle ne nécessite aucune reconstruction. Une ingestion du même snapshot est idempotente ; un autre snapshot exige une base dédiée, sans suppression automatique.
 
-### Idempotence et versions
+## 5. Chunking et embeddings
 
-`MERGE` utilise les IDs canoniques. Relancer le même snapshot ne doit pas ajouter
-de doublons. Le document conserve un hash et une version ; le modèle conserve
-son identifiant, sa révision et sa dimension. Un vecteur existant est réutilisé
-si ces éléments correspondent.
+### Un film, un document principal
 
-Une autre version des CSV ne provoque pas de suppression automatique : le chargeur
-demande une base dédiée. Ce MVP ne gère pas une synchronisation incrémentale complète.
+Le texte indexé contient :
+~~~text
+Title: ...
+Overview: ...
+Genres: ...
+Keywords: ...
+~~~
 
-Le manifeste local conservé indique 4 801 documents encodés, dont 2 `metadata_only`,
-et **0 document ayant nécessité de retirer des keywords** lors de cette ingestion.
-La logique de réduction existe même si ce snapshot n’en a pas eu besoin.
+Il n'y a ni découpage glissant systématique ni overlap : les synopsis sont courts. Les acteurs et réalisateurs restent dans le graphe. Un film produit au maximum un embedding principal.
 
-## 5. La logique du chunking — point essentiel
+Le tokenizer compte l'entrée complète, préfixe et tokens spéciaux inclus. Si la fenêtre est dépassée, les derniers keywords sont retirés du document et le texte est recompté. Si cela ne suffit pas, une erreur est signalée, sans troncature silencieuse du synopsis. Les keywords sources restent conservés sur Movie. Le manifeste enregistré indiquait zéro document réduit.
 
-### 5.1 Définition
+- 384 : nombre de composantes du vecteur.
+- 512 tokens : fenêtre d'entrée E5, pas 512 mots.
+- 500 objets : lot d'écriture, pas taille de chunk.
+- 32 documents : lot d'encodage.
+- Aucun lot de 20 inspections Groq dans le nouveau parcours.
 
-Un chunk est une unité de texte indexée pour la recherche sémantique. Dans un RAG
-sur de longs PDF, on peut découper les documents en passages. Le choix dépend de
-la longueur, du sens à préserver et de la fenêtre du modèle.
+Les synopsis absents avec keywords donnent metadata_only. Sans synopsis ni keyword exploitable, le film reste interrogeable dans le graphe mais sans embedding thématique.
 
-**Ici, l’unité retenue est le film entier : un film produit au maximum un document
-principal et un embedding. Il n’y a pas de découpage glissant systématique.**
+La baseline flat ajoute les crédits au texte et peut donc créer plusieurs morceaux. Le score du film y est le maximum des scores de ses morceaux ; ce découpage ne décrit pas le corpus principal.
 
-Ce choix s’appuie sur les synopsis courts : médiane 48 mots, maximum 175 mots.
-Garder le film ensemble conserve intrigue, genres et annotations dans une unité
-cohérente. Les acteurs et réalisateurs restent dans le graphe.
+### Recherche multilingue
 
-### 5.2 Texte réellement indexé
+E5 encode les documents avec passage: et la requête thématique avec query:. Les vecteurs sont normalisés. La requête doit utiliser le modèle et la révision du snapshot.
 
-Dans `ingestion/documents.py`, le format principal est :
+Le modèle rapproche des textes de différentes langues ; cela permet la comparaison d'une requête française avec un synopsis anglais. Voir la [fiche E5](https://huggingface.co/intfloat/multilingual-e5-small).
 
-```text
-Title: Inception
-Overview: ... synopsis anglais complet ...
-Genres: Action, Thriller, Science Fiction, Mystery, Adventure
-Keywords: loss of lover, dream, kidnapping, sleep, subconsciousness, ...
-```
+La similarité cosine compare les directions des vecteurs :
+~~~text
+cos(q,d) = (q · d) / (norme(q) × norme(d))
+~~~
+Un score est un signal de classement, pas une probabilité de pertinence ou une preuve de vérité. E5 n'établit pas les collaborations.
 
-`LocalEmbedder.encode_passages()` ajoute ensuite `passage: ` au début du texte.
-Les crédits de casting ne sont pas ajoutés à ce document principal : ils peuvent
-être vérifiés précisément par les relations et gonfleraient inutilement le texte.
+## 6. Analyse, opérations et quantité demandée
 
-Trois variantes sont disponibles dans la fonction :
+QuestionDraft contient :
+~~~text
+supported, unsupported_reason
+operation : list | count | recommend
+mentions, variables, edges, target, filters
+theme_request, distinct_movies
+requested_limit : entier explicite ou null
+~~~
 
-| Variante | Contenu | Utilisation |
-| --- | --- | --- |
-| `overview` | Synopsis seul. | Variante possible pour une comparaison. |
-| `title_overview` | Titre et synopsis. | Variante possible pour une comparaison. |
-| `enriched` | Titre, synopsis, genres et keywords. | Variante utilisée par l’ingestion actuelle. |
+Le type retourné vient du label de la variable cible : Movie ou Person. Le LLM n'émet ni IDs canoniques ni Cypher libre. Pydantic impose les types, directions, références, motifs connectés acycliques et quatre relations maximum. Une correction d'analyse est autorisée.
+Après un refus JSON du fournisseur, cette correction peut utiliser le mode JSON objet, toujours validé par Pydantic. Voir les [formats Groq](https://console.groq.com/docs/structured-outputs). Le nombre d'essais d'analyse reste borné à deux ; une erreur de fournisseur persistante est signalée.
 
-La présence de ces variantes ne signifie pas que leur qualité a déjà été comparée
-dans un benchmark complet.
-
-### 5.3 Tokens, mots et dimension : trois notions différentes
-
-- **48 mots** : une statistique sur les synopsis.
-- **512 tokens** : la limite d’entrée du modèle E5 utilisé, en incluant préfixe et tokens spéciaux.
-- **384 dimensions** : le nombre de composantes numériques du vecteur produit.
-
-Un token peut être un mot, un morceau de mot ou de ponctuation. Il n’y a donc pas
-d’égalité générale entre nombre de mots et nombre de tokens.
-
-`build_document()` compte les tokens avec le tokenizer réel, sans troncature :
-
-```text
-construire le document
-compter les tokens de « passage: » + document + tokens spéciaux
-si le total respecte la fenêtre : accepter
-sinon : retirer un keyword à la fin et recompter
-si le texte dépasse encore sans keywords : signaler une erreur
-```
-
-Le synopsis n’est pas coupé silencieusement. Le code ne crée pas automatiquement
-plusieurs morceaux si titre + synopsis + genres dépassent la fenêtre sans keywords.
-Il n’existe pas de paramètre d’overlap dans ce parcours.
-
-### 5.4 Les synopsis absents
-
-- Synopsis non vide : document avec couverture `overview`.
-- Synopsis vide mais keywords présents : document `metadata_only`.
-- Synopsis vide et aucun keyword exploitable : pas d’embedding thématique.
-
-Ainsi, 4 synopsis sont absents, mais seulement 2 films sont sans embedding : les
-2 autres restent encodables grâce à leurs métadonnées. Les 4 803 films restent
-accessibles au graphe et au linking.
-
-### 5.5 Le chunking particulier de la baseline `flat`
-
-Dans `evaluation.py`, la baseline `flat` ajoute des lignes `actor: ...` et
-`director: ...` aux documents. Ces listes peuvent être longues.
-
-Son algorithme ajoute les crédits un par un jusqu’à la fenêtre de tokens. Quand
-le prochain crédit ferait déborder, il conserve le document courant et ouvre un
-nouveau morceau contenant le titre et ce crédit. Il n’y a pas de chevauchement
-glissant ni de duplication systématique du synopsis dans chaque morceau.
-
-Un film peut donc produire plusieurs vecteurs **dans cette baseline**. Au retrieval,
-le score du film est le maximum des scores de ses morceaux :
-
-```text
-score(film) = max(score(chunk_1), score(chunk_2), ...)
-```
-
-Ces documents de baseline sont préparés pour l’évaluation ; ils ne remplacent pas
-les documents principaux stockés sur les nœuds Movie.
-
-### 5.6 Ne pas confondre chunking et batching
-
-| Valeur | Objet découpé | Effet |
-| --- | --- | --- |
-| 1 document par film | Unité sémantique principale. | Définit ce qui est représenté par un vecteur. |
-| 500 objets | Lots d’écriture du graphe. | Réduit le nombre de transactions d’ingestion. |
-| 32 documents | Lots d’encodage E5. | Organise le calcul sur CPU. |
-| 20 candidats | Lots d’évaluation thématique Groq. | Borne la taille des requêtes du vérificateur. |
-
-La fonction appelée `chunks()` dans `loader.py` découpe des **listes d’objets en lots**.
-Elle ne découpe pas les synopsis en passages sémantiques.
-
-## 6. Embeddings et recherche multilingue
-
-`LocalEmbedder` charge le modèle une fois, avec un verrou pour éviter les chargements
-concurrents. Il utilise le CPU et normalise les vecteurs.
-
-- Les documents sont préfixés par `passage: `.
-- La requête thématique est préfixée par `query: `.
-- Les questions trop longues pour la fenêtre d’embedding sont refusées.
-- Le modèle et la révision doivent correspondre à ceux du snapshot vectoriel.
-
-E5 multilingue place des textes de différentes langues dans un espace comparable,
-ce qui permet une question française face à des synopsis anglais. Le modèle produit
-384 dimensions et ses instructions demandent les préfixes même hors anglais.
-Voir sa [fiche officielle](https://huggingface.co/intfloat/multilingual-e5-small).
-Le bénéfice mesuré français–anglais sur ce corpus nécessite encore une évaluation dédiée.
-
-La similarité cosine compare les directions de deux vecteurs :
-
-```text
-cos(q, d) = (q · d) / (norme(q) × norme(d))
-```
-
-Avec des vecteurs normalisés, le produit scalaire représente le cosine mathématique.
-Le code de production utilise `vector.similarity.cosine` dans Neo4j. Le score de
-similarité est un signal de classement ; ce n’est pas une probabilité de vérité.
-
-**Embeddings et LLM n’ont pas le même rôle :** E5 encode le sens pour rechercher ;
-le modèle servi par Groq interprète des demandes et produit des objets ou du texte.
-Aucun fine-tuning de ces modèles n’est réalisé par le projet.
-
-## 7. Contrats de données et analyse de la question
-
-`schemas/models.py` contient les contrats Pydantic. Les champs supplémentaires sont
-interdits ; les validations métier contrôlent aussi les liens entre les objets.
-
-| Contrat | Contenu |
+| Opération | Fonction |
 | --- | --- |
-| `QuestionRequest` | Question, langue, limite, offset, choix d’entités et token éventuel. |
-| `QuestionDraft` | Plan déclaratif : mentions, variables, relations, cible, filtres et thèmes. |
-| `Mention` | Extrait de question et type attendu ; rôle, année ou film d’identification éventuels. |
-| `Variable`, `Edge`, `Filter` | Variables du motif, relations autorisées et filtres de films. |
-| `ThemeRequest` | Requête sémantique, thèmes, `ALL`/`ANY`, association ou centralité. |
-| `EntityCandidate`, `LinkResult` | Identités proposées, résolution et contexte vérifié. |
-| `ThemeJudgment`, `AssessmentBatch` | Verdicts thématiques structurés sur les films fournis. |
-| `Evidence` | ID de preuve, type, entité et données de provenance. |
-| `GeneratedAnswer` | Affirmations accompagnées d’IDs de preuves. |
-| `Coverage`, `AnswerResponse` | Résultats, couverture, avertissements et trace. |
+| list | Liste factuelle de Movie ou Person, sans thème. |
+| count | Nombre exact de cibles distinctes selon les relations et filtres. |
+| recommend | Classement thématique de Movie, avec ou sans contraintes structurelles. |
 
-L’analyseur appelle Groq avec un schéma JSON et des exemples. Il extrait un plan,
-**sans fournir d’ID TMDB ni de Cypher libre**. Une correction après erreur de
-validation est autorisée. Les mentions doivent correspondre à des extraits de la
-question ; une année d’identification ne doit pas être inventée.
+Les comptages globaux simples couvrent films, personnes, acteurs et réalisateurs. Un acteur ou réalisateur est compté comme Person avec au moins une relation du rôle demandé. Les autres motifs gardent leurs ancres/filtres.
 
-Pour Q8, la représentation utile est :
+La quantité demandée n'est jamais la cardinalité du dataset :
+- « recommande trois films » : jusqu'à trois résultats ;
+- « recommande un film » : au maximum un ;
+- sans quantité : limite de l'interface, défaut cinq ;
+- demande supérieure à vingt : plafond vingt avec avertissement ;
+- « combien de films ? » : aucun top-k ; Neo4j calcule le compte.
 
-```text
-mention réalisateur = « Nolan »
-mention acteur      = « DiCaprio »
-réalisateur ─DIRECTED→ résultat
-acteur      ─ACTED_IN→ résultat
-thème : rêves, association
-cible : résultat, de type Movie
-```
+Les quantités sont extraites par l'analyseur et contrôlées contre le texte dans quantities.py. Les formes usuelles numériques, françaises et anglaises sont reconnues. Les années ne doivent pas être transformées en limites. La pagination utilise effective_limit et non une ancienne valeur de l'interface.
 
-Les validations imposent notamment : références existantes, directions conformes,
-motif connecté et acyclique, quatre relations maximum, cible compatible avec le
-type de réponse, filtres autorisés et absence de contradiction numérique.
-Un schéma valide ne prouve toutefois pas que le LLM a parfaitement compris l’intention.
+## 7. Entity Linking
 
-## 8. Entity linking et désambiguïsation
+Normalisation de casse/accents/espaces ; recherche exacte et alias, patronyme d'un seul mot, puis full-text fuzzy. Les genres utilisent une table de correspondance français–anglais. Les titres traduits absents ne sont pas inventés.
 
-### Algorithme effectif
+Contexte explicite : rôle, année et film d'identification. Les films d'identification sont résolus avant les personnes. Une correspondance fuzzy reste à confirmer ; plus de dix candidats exige une précision.
 
-1. Normaliser casse, accents et espaces.
-2. Pour les genres, appliquer une table contrôlée : par exemple science-fiction → Science Fiction.
-3. Chercher une correspondance exacte sur nom/titre normalisé et alias utilisables.
-4. Pour une personne mentionnée par un seul mot, chercher le patronyme.
-5. À défaut, utiliser le full-text avec une tolérance de faute d’un caractère sur les tokens admissibles.
-6. Filtrer par rôle, année et film d’identification explicitement présents dans la question.
-7. Résoudre si une seule identité compatible subsiste, sauf si la correspondance est seulement fuzzy.
-8. Demander confirmation ou clarification si nécessaire.
+Tom Holland correspond à deux IDs : 1136406 et 64796. Un contexte comme le réalisateur de Fright Night peut les départager. La popularité n'est pas une preuve d'identité.
 
-Les alias de personnes sont initialement vides dans l’ingestion actuelle. « Nolan »
-peut être retrouvé par le patronyme, sans prétendre disposer d’un dictionnaire
-complet de surnoms ou de traductions de titres.
+Une identité exacte unique sans film d'identification n'est pas éliminée simplement parce qu'elle n'a aucun crédit pour la relation demandée. Ainsi, une personne connue sans DIRECTED peut donner un compte zéro. Le contexte d'identification explicitement fourni reste vérifié.
 
-### Exemple d’homonymie
+Les tokens de clarification HMAC-SHA256 conservent le plan et les choix autorisés/confirmés. Ils sont liés à la question exacte, expirent après trente minutes et sont invalidés par un redémarrage. Ils sont signés, pas chiffrés. Les choix sont revalidés côté serveur.
 
-Tom Holland correspond à deux IDs du corpus, `1136406` et `64796`.
-« Le réalisateur de Fright Night » fournit un contexte vérifiable ; une préférence
-pour l’acteur célèbre ne fournit pas une preuve d’identité.
+## 8. Retrieval et comptages
 
-Le système résout les films d’identification avant les personnes qui en dépendent.
-Il ne choisit pas l’homonyme qui donne simplement une liste non vide.
-Une correspondance fuzzy reste à confirmer. Plus de dix candidats demande de préciser la question.
+### Comptage exact
 
-### Clarifications signées
+Python compile le motif avec ses valeurs paramétrées. graph_count() projette COUNT(DISTINCT cible), sans LIMIT ni clé de regroupement. Avec des identités résolues et zéro correspondance, l'agrégat retourne zéro.
 
-`clarifications.py` encode un plan, les nouveaux choix autorisés et les choix déjà
-confirmés dans un token signé par HMAC-SHA256. Il est lié à la question exacte et
-expire après 30 minutes. La signature protège l’intégrité ; elle ne chiffre pas le contenu.
+La réponse contient count et une preuve aggregate avec valeur, type de cible, bindings, motif, snapshot et hashes des CSV. results est vide ; coverage.returned ne représente pas le compte. Aucun appel de génération, embedding ou reranking n'est nécessaire.
 
-Le secret étant recréé au démarrage de l’API, un redémarrage invalide les anciens tokens.
-Le serveur restaure les choix confirmés et les revalide dans le contexte du graphe.
-Le client ne peut pas introduire arbitrairement un autre ID dans une clarification.
+### Liste relationnelle
 
-## 9. Router et stratégies de retrieval
+Tous les IDs admissibles sont dédupliqués et triés par ID. Une page est affichée, avec un témoin relationnel par résultat. Le total et la page sont distincts : afficher vingt des 509 acteurs de Nolan ne signifie pas qu'il n'en existe que vingt dans le corpus.
+La réponse liste contient un plan signé dans clarification_token. Les pages suivantes le réutilisent et revalident les identités sans nouvelle analyse Groq, ce qui stabilise le motif entre pages.
 
-Le Router est la fonction `route()` de `retrieval/compiler.py`, pas un fichier séparé.
+### Recommandations E5
 
-| Plan résolu | Stratégie | Exemple |
-| --- | --- | --- |
-| Relations ou filtres, sans thème | `GRAPH` | Films de Nolan avec Murphy. |
-| Thèmes sans contraintes structurelles | `VECTOR` | Films sur les rêves et la réalité. |
-| Structure et thèmes | `HYBRID_GRAPH_FIRST` | Films de Nolan avec DiCaprio parlant des rêves. |
-| Entité non résolue | Clarification ou entité absente, avant Router. | Tom Holland ambigu. |
-| Intention non couverte | `unsupported`. | Négation ou chemin libre. |
+- VECTOR : calcul exact sur tous les films encodés du corpus, soit 4 801 pour ce snapshot.
+- HYBRID_GRAPH_FIRST : toutes les contraintes d'abord, puis calcul exact sur tous les candidats encodés admissibles.
+- Tri score décroissant, puis ID croissant.
+- Vérification de l'intégrité et de la disponibilité des sources pour les résultats retenus.
+- Jusqu'à k résultats ; aucun ajout artificiel si moins de candidats existent.
 
-### GRAPH
+Il n'y a plus de plafond de cent candidats ni d'appel assess. ranking_coverage indique la disponibilité des embeddings pour le classement, pas une vérification des thèmes. Une liste top-k n'est pas une liste exhaustive de films thématiquement pertinents.
 
-`compile_graph()` transforme le plan validé en motifs Cypher. Les variables sont
-renommées avec des alias internes ; les valeurs sont des paramètres. Les noms de
-labels, relations, propriétés et opérateurs proviennent des valeurs autorisées.
+La fonction exacte est [documentée par Neo4j](https://neo4j.com/docs/cypher-manual/5/functions/vector/). Le calcul peut être complet sans que la pertinence sémantique soit parfaite.
 
-`graph_candidates()` récupère tous les IDs distincts admissibles, ordonnés par ID.
-La pagination est ensuite appliquée. Les témoins relationnels sont cherchés pour
-les résultats affichés, avec un chemin valide par résultat.
+## 9. Preuves, augmentation et génération
 
-### VECTOR
-
-La requête thématique est encodée par E5. `db.index.vector.queryNodes` demande au
-plus 100 candidats selon le budget configuré. Il s’agit d’une recherche approximative.
-L’index natif s’appuie sur HNSW selon la [documentation Neo4j](https://neo4j.com/docs/cypher-manual/5/indexes/semantic-indexes/vector-indexes/).
-
-Le graphe interne HNSW de l’index n’est pas le graphe métier Person–Movie–Genre.
-Les candidats sont ensuite vérifiés thématiquement ; un voisin proche n’est pas
-automatiquement une recommandation prouvée.
-
-### HYBRID_GRAPH_FIRST
-
-```text
-appliquer toutes les contraintes de graphe
-→ récupérer tous les films admissibles
-→ encoder uniquement la requête thématique
-→ calculer la similarité exacte pour chaque candidat disposant d’un vecteur
-→ examiner les sources par lots
-→ retenir les réponses justifiées, dans la limite demandée
-```
-
-Graph First décrit ici la sélection des candidats : le graphe détermine les films
-à scorer. Dans l’ordre technique actuel de `_ask()`, le vecteur de la requête est
-calculé avant l’appel à `graph_candidates()`, puis utilisé uniquement sur ses résultats.
-
-La fonction de calcul exact est documentée par [Neo4j](https://neo4j.com/docs/cypher-manual/5/functions/vector/).
-Un top vectoriel global limité n’est pas intersecté avec le graphe : cela pourrait
-perdre des films admissibles absents de ce top global.
-
-Le système garantit l’application des contraintes structurelles de son plan et
-le scoring des candidats encodés. Il ne garantit pas que toute la sélection
-thématique a été examinée : l’inspection Groq reste bornée.
-
-**Détail de classement à connaître :** les candidats arrivent classés par cosine.
-Dans chaque lot, les films acceptés sont ensuite triés par nombre de thèmes avec
-appui du synopsis, puis score, puis ID. L’arrêt à la limite peut intervenir avant
-les lots suivants. L’ordre final n’est donc pas simplement le classement cosine
-global de tous les films, ni un optimum global démontré après vérification.
-
-### Ce qui n’est pas implémenté
-
-Un hybride Vector First et une recherche hybride parallèle restent des évolutions
-à mesurer. La stratégie VECTOR actuelle est une recherche thématique pure, pas
-l’implémentation d’un hybride Vector First.
-
-Il n’y a pas de cross-encoder spécialisé. La vérification thématique est déjà une
-seconde étape de sélection LLM ; elle ne doit pas être présentée comme un reranker
-spécialisé entraîné pour ce corpus.
-
-## 10. Preuves, augmentation et génération
-
-### 10.1 Vérification thématique
-
-`GroqLLM.assess()` reçoit les titres, synopsis, keywords et IDs des films du lot.
-Son schéma est spécialisé avec les IDs des films, les thèmes et les tailles attendues.
-Il retourne un jugement pour chaque film et chaque thème demandé.
-
-Deux axes sont séparés :
-
-| Axe | Valeurs |
+| Preuve | Contenu |
 | --- | --- |
-| Source | `overview`, `keyword`, `both`, `none`. |
-| Centralité | `central`, `peripheral`, `unknown`. |
+| relation | Nœuds et relations d'un motif témoin valide. |
+| document | Titre, synopsis source, keywords avec IDs, genres, couverture, hash/version et snapshot. |
+| aggregate | COUNT DISTINCT, valeur, cible, motif, paramètres et provenance. |
 
-`validate_assessments()` vérifie :
+document_evidence() vérifie identité, snapshot, modèle/révision, hash du document et cohérence des annotations. Cela ne certifie pas que le document répond au thème. Aucun jugement automatique central/peripheral n'est produit.
 
-- exactement les films et thèmes fournis, sans omission ni duplication ;
-- les citations du synopsis comme extraits continus exacts ;
-- les IDs de keywords comme annotations réellement présentes ;
-- l’impossibilité d’affirmer une centralité à partir d’un keyword seul ;
-- les conditions `ALL` ou `ANY` et la demande d’association ou de centralité.
+Le contexte JSON assemble question, langue, demande thématique, résultats, preuves référencées et couverture. Budget : 24 000 caractères sérialisés. Aucun vecteur n'est transmis au générateur. Les ensembles résultat + preuves ne sont pas coupés au milieu.
 
-**Exemple :** Interstellar possède le keyword `artificial intelligence` (`310`),
-mais son synopsis disponible ne démontre pas que l’IA est centrale. L’annotation
-peut justifier une association ; une affirmation de centralité réclame un autre appui.
+COUNT et LIST sont rendus de façon déterministe. RECOMMEND peut recevoir une synthèse Groq française si elle est activée et que le contexte n'a pas été limité. Le modèle retourne des affirmations avec evidence_ids. Les références sont validées ; leur implication sémantique exige une évaluation humaine.
 
-La validation d’un extrait exact ne démontre pas toute sa bonne interprétation :
-une revue humaine reste nécessaire pour les cas sémantiques.
+Si la synthèse échoue, cite une preuve inconnue ou si le contexte est limité, le rendu déterministe reste disponible. Les résultats structurés conservent toutes leurs sources.
 
-### 10.2 Les trois types de preuves
+Les mots « centralité certifiée », les comptages thématiques et les demandes thématiques exhaustives exigent une reformulation. Un keyword indique une annotation ; il ne suffit pas à prouver la centralité.
 
-| Type | Contenu |
-| --- | --- |
-| `relation` | Nœuds d’identité et relations d’un chemin témoin avec propriétés utiles. |
-| `overview` | Thème, citation exacte, centralité et snapshot. |
-| `keyword` | Thème, IDs/noms des annotations, centralité inconnue et snapshot. |
+## 10. Parcours d'une question
 
-Chaque résultat conserve ses `evidence_ids`. Le frontend relie ces références aux
-preuves affichées. Le champ `type` du résultat distingue Movie de Person avant
-de permettre l’ouverture d’une fiche de film.
-
-### 10.3 Context Builder
-
-`build_context()` assemble :
-
-```text
-question + langue + demande thématique
-+ résultats sélectionnés
-+ preuves complètes de chaque résultat
-+ couverture
-```
-
-Son budget initial est **24 000 caractères de JSON sérialisé**, et non 24 000 tokens.
-Il ajoute un résultat avec son ensemble de preuves, sans couper une citation au
-milieu. Si le prochain ensemble dépasse le budget, il s’arrête et signale la limitation.
-
-L’API conserve les résultats et preuves complets même si le contexte de synthèse
-est limité. Dans ce cas, le code actuel choisit un rendu déterministe au lieu de
-lancer une synthèse sur un contexte incomplet.
-
-### 10.4 Génération
-
-Pour `GRAPH`, la réponse finale est une liste déterministe avec références.
-Pour VECTOR ou HYBRID, une synthèse Groq est possible si elle est activée, que le
-contexte est non vide et qu’il n’a pas été limité.
-
-Le prompt demande une réponse française fondée sur les preuves et distinguant
-association et centralité. Le modèle retourne des affirmations avec leurs IDs de
-preuves. `validate_generated()` contrôle que les références existent.
-
-Ce contrôle **ne prouve pas l’implication de chaque phrase par sa citation**.
-En cas d’échec de génération, d’appel fournisseur ou de validation, le rendu
-déterministe demeure disponible avec un avertissement.
-
-### 10.5 Couverture et observabilité
-
-`Coverage` distingue `total_candidates`, `scored`, `examined`, `returned`,
-`without_embedding`, `approximate`, `semantic_coverage`, `offset` et `has_more`.
-
-La trace conserve snapshot, hashes, modèle, révision, plan, bindings, motif exécuté,
-latence et consommation. Elle ne publie pas le contexte exact envoyé au générateur,
-le classement intermédiaire complet ni un champ explicite de mode de génération.
-Le nombre d’appels Groq ne suffit donc pas à certifier qu’une synthèse finale a eu lieu.
-
-## 11. Parcours complet d’une question
-
-```mermaid
+~~~mermaid
 flowchart TD
-    Q["POST /questions"] --> S["Vérification du corpus"]
-    S --> A["Analyse Groq ou reprise du plan signé"]
-    A --> V["Validation Pydantic et métier"]
-    V --> L["Entity linking et contexte"]
-    L --> E{"Identités résolues ?"}
+    Q["Question"] --> A["Analyse Groq ou plan signé"]
+    A --> V["Validation et linking"]
+    V --> E{"Identités résolues ?"}
     E -- non --> C["Clarification / entité absente"]
-    E -- oui --> R{"Router"}
-    R -- GRAPH --> G["Tous les candidats structurels puis pagination"]
-    R -- VECTOR --> N["Embedding de requête et index ANN"]
-    R -- HYBRID --> H["Contraintes puis cosine exact de tous les candidats encodés"]
-    N --> T["Vérification thématique par lots"]
-    H --> T
-    G --> P["Preuves et contexte"]
-    T --> P
-    P --> M{"Synthèse permise ?"}
-    M -- non --> D["Rendu déterministe"]
-    M -- oui --> F["Synthèse Groq et contrôle des références"]
-    F -- échec --> D
-    F -- succès --> O["AnswerResponse + trace"]
-    D --> O
-    O --> W["Affichage des résultats et preuves"]
-```
+    E -- oui --> R{"Opération"}
+    R -- count --> N["COUNT DISTINCT et provenance"]
+    R -- list --> G["Relations puis pagination"]
+    R -- recommend --> H["Corpus ou candidats du graphe"]
+    H --> S["Cosine exact de tous les candidats encodés"]
+    S --> K["Top-k et intégrité documentaire"]
+    K --> CT["Contexte et chemins témoins"]
+    CT --> L["Synthèse Groq ou rendu déterministe"]
+    N --> O["Réponse structurée"]
+    G --> O
+    L --> O
+~~~
 
-### Exemple concret : Nolan, DiCaprio et les rêves
+### Q8 : Nolan, DiCaprio et les rêves
 
-Question : **« Quels films de Nolan avec DiCaprio parlent des rêves ? »**
+Analyse de deux personnes, deux relations et un thème ; résolution des identités ; un seul candidat structurel : Inception 27205. Son embedding est scoré, son document est fourni avec les relations, puis une synthèse peut être produite.
 
-| Étape | Travail effectué |
-| --- | --- |
-| Analyse | Deux personnes, un film résultat, deux relations et un thème. |
-| Linking | Nolan → Christopher Nolan `525` ; DiCaprio → Leonardo DiCaprio `6193`. |
-| Router | Structure + thème → `HYBRID_GRAPH_FIRST`. |
-| Graphe | Intersection des films réalisés par Nolan et des films joués par DiCaprio. |
-| Candidats | Un seul dans le corpus : Inception `27205`. |
-| Embedding | Encodage de la demande thématique, sans les noms de personnes inutiles à cette similarité. |
-| Scoring | Un candidat encodé, donc un score calculé ; cela ne signifie pas que son score vaut 1. |
-| Vérification | Chercher un appui dans synopsis et keywords ; `dream` porte l’ID `1566`. |
-| Preuves | Relations Nolan/DiCaprio et appui thématique exact. |
-| Réponse | Inception avec références et synthèse éventuelle. |
+Un candidat scoré ne signifie pas un score égal à 1. Le synopsis parle du subconscient et le keyword dream existe, mais le système n'émet plus un verdict thématique certifié. Il ne complète pas artificiellement la liste jusqu'à cinq films.
 
-Le synopsis parle du subconscient sans contenir littéralement le mot `dream`.
-Une preuve par keyword peut donc être légitime ; le film ne doit pas être accepté
-simplement parce que le modèle connaît déjà Inception.
+### Q9 et Q10 : plusieurs sauts
 
-## 12. Raisonnement multi-sauts : ce qui le rend vérifiable
-
-### Plusieurs films témoins
-
-Pour « Quels réalisateurs ont travaillé avec DiCaprio et Murphy ? », deux chemins
-peuvent utiliser des films différents. Danny Boyle a dirigé DiCaprio dans
-The Beach et Murphy dans 28 Days Later. Nolan a dirigé les deux dans Inception.
-
-Le compilateur émet des clauses MATCH séparées pour permettre à deux variables
-de témoins de partager un même film et une même relation quand la question l’autorise.
-Il n’impose des films distincts que via une contrainte explicite `distinct_movies`.
-
-### Film résultat différent du film témoin
-
-Pour la question Q9 sur l’IA :
-
-```text
+~~~text
 DiCaprio ─ACTED_IN→ film_témoin ←DIRECTED─ réalisateur
 réalisateur ─DIRECTED→ film_résultat ─IN_GENRE→ Science Fiction
-```
+~~~
 
-Le thème IA est apprécié sur le film résultat. DiCaprio n’a pas à jouer dans ce film.
-Exemple : Spielberg a réalisé Catch Me If You Can avec DiCaprio et a aussi réalisé
-A.I. Artificial Intelligence.
+Le thème porte sur film_résultat ; DiCaprio n'a pas besoin d'y jouer. Spielberg / Catch Me If You Can / A.I. Artificial Intelligence constitue un exemple de motif.
 
-La question donne 23 candidats structurels dans ce snapshot ; cela ne signifie pas
-que ces 23 films parlent d’IA. Q10, autour de Matt Damon et de la survie, donne
-254 candidats structurels ; l’inspection thématique reste limitée à 100.
+Q9 possède 23 candidats structurels ; Q10 en possède 254. Tous les candidats encodés sont scorés. Cela ne signifie pas qu'ils satisfont tous le thème.
 
-Le raisonnement implémenté repose sur des motifs de relations et des filtres. Ce
-n’est pas une recherche de chemins arbitraires, un BFS général, un entraînement
-GNN ou une génération libre de relations par le LLM.
+Pour Q4, les films témoins de deux collaborations peuvent différer : Nolan a dirigé DiCaprio et Murphy dans Inception ; Boyle les a dirigés dans The Beach et 28 Days Later.
+
+## 11. Algorithmes réellement utilisés
+
+Le retrieval graphe utilise des motifs Cypher paramétrés. Le moteur choisit son plan ; le projet n'impose pas un BFS ou DFS du voisinage métier. Il n'utilise ni PageRank, ni Jaccard, ni Leiden/Louvain, ni plus court chemin.
+
+Un petit DFS dans la validation vérifie la connexion des variables du plan. Ce n'est pas un parcours du corpus pour répondre. La centralité de degré n'est pas un jugement de centralité thématique.
+
+L'approche est proche de Text2Cypher, avec une étape déclarative contrôlée entre le LLM et le Cypher. L'hybride est Graph First, pas vecteur puis expansion arbitraire. Aucun résumé de communauté Microsoft GraphRAG n'est calculé.
+
+## 12. API, couverture et déploiement
+
+Endpoints inchangés : GET /, /static, /health, /ready, /entities/search, /movies/{id}, /docs ; POST /questions.
+
+AnswerResponse expose :
+~~~text
+status, operation, strategy, count
+resolved_entities, results, answer, evidence
+thematic_verification, coverage, warnings, trace_id, trace
+~~~
+
+- count : entier pour COUNT, sinon null.
+- thematic_verification : not_performed pour les recommandations ; not_applicable sinon.
+- coverage : total_candidates, scored, sources_checked, returned, without_embedding, ranking_coverage, approximate, offset, has_more, effective_limit.
+- ranking_coverage : complete/partial selon les embeddings disponibles ; aucun examen thématique n'est sous-entendu.
+- approximate : false dans les parcours actuels.
+- trace : snapshot/hashes, plan, bindings, motif, limites, sélection, scoring_ms, contexte limité, références du contexte, generation_mode, latence et appels/tokens/modèles par étape.
+
+scoring_ms mesure l'appel de scoring et la récupération de ses résultats, pas la totalité des coûts E5 et Groq. Les valeurs mesurées dépendent de la machine et de l'état des services.
+
+Les statuts restent ok, needs_clarification, entity_not_found, no_match_in_dataset, insufficient_evidence, unsupported et dependency_error. HTTP 200 n'est pas une garantie de statut métier ok.
+
+Le frontend présente un nombre et sa provenance pour COUNT, des pages pour LIST et des cartes sourcées pour RECOMMEND. La question, les choix et les pages restent en mémoire. Modifier la question ou la limite les réinitialise.
+
+Deux services persistants : API et Neo4j, avec restart unless-stopped. Le volume Neo4j contient graphe et vecteurs ; data/ et models/ sont sur la machine. Ports locaux 8000, 7474, 7687. La clé Groq reste côté serveur.
+
+L'image saved-20261108 est un état historique antérieur à cette adaptation. Le code courant est monté depuis src/. Les volumes, CSV, cache et .env restent distincts d'une image.
+
+~~~powershell
+docker compose up -d --no-build --pull never
+docker compose restart api
+~~~
+
+/ready vérifie le corpus, les index, la configuration de clé et le modèle chargé ; il ne vérifie pas le quota Groq.
 
 ## 13. Chaque fichier : rôle et place dans le système
 
-Les chemins ci-dessous sont relatifs à la racine. Tous les fichiers suivis présents
-avant ce dossier sont couverts ; les fichiers locaux ignorés sont distingués ensuite.
+Les chemins ci-dessous sont relatifs à la racine. Les fichiers suivis du projet sont couverts ; les fichiers locaux ignorés sont distingués ensuite.
 
 ### 13.1 Racine et configuration
 
@@ -675,8 +366,9 @@ avant ce dossier sont couverts ; les fichiers locaux ignorés sont distingués e
 | `src/moviegraphrag/config.py` | `Settings` : lit l’environnement, valide budgets et tarifs facultatifs ; protège les secrets avec `SecretStr`. |
 | `src/moviegraphrag/cli.py` | `main()` : commandes `profile`, `ingest`, `reference`, `warmup`, `versions`, `evaluate`. |
 | `src/moviegraphrag/orchestration.py` | `MovieGraphRAG.ask()` et `_ask()` : pilote de bout en bout, erreurs, trace, choix du retrieval, preuves et réponse. |
+| `src/moviegraphrag/quantities.py` | Extraction et validation des quantités explicites, détection des comptages et demandes de centralité. |
 | `src/moviegraphrag/embeddings.py` | `LocalEmbedder` : chargement E5, verrou, préfixes, normalisation, métadonnées et encodage CPU. |
-| `src/moviegraphrag/examples.py` | Questions Q1–Q10 et plans de référence ; sert aux tests et à trois exemples inclus dans le prompt d’analyse. Ce n’est pas un système de réponses prédéfinies à l’exécution. |
+| `src/moviegraphrag/examples.py` | Questions Q1–Q10 et plans de référence ; sert aux tests et aux exemples du prompt d’analyse. Ce n’est pas un système de réponses prédéfinies à l’exécution. |
 | `src/moviegraphrag/evaluation.py` | Références indépendantes depuis les CSV, validation des cas, conservation des annotations, métriques et exécution des trois systèmes comparés. |
 
 ### 13.3 Ingestion
@@ -702,9 +394,9 @@ avant ce dossier sont couverts ; les fichiers locaux ignorés sont distingués e
 
 | Fichier | Responsabilité |
 | --- | --- |
-| `src/moviegraphrag/llm/prompts.py` | Prompts versionnés `ANALYZER`, `ASSESSOR`, `GENERATOR`, règles de sources et d’intention. |
-| `src/moviegraphrag/llm/groq.py` | `GroqLLM`, `strict_schema()`, `Usage`, reprise réseau : appels JSON structurés, adaptation du schéma, correction d’analyse, évaluation, génération et comptage. |
-| `src/moviegraphrag/evidence/validation.py` | `validate_assessments()` : exactitude des références de source, présence des thèmes et règles d’acceptation. |
+| `src/moviegraphrag/llm/prompts.py` | Prompts versionnés `ANALYZER`, `GENERATOR`, règles de sources et d’intention. |
+| `src/moviegraphrag/llm/groq.py` | `GroqLLM`, `strict_schema()`, `Usage`, reprise réseau : appels JSON structurés, adaptation du schéma, correction d’analyse, génération et comptage des appels/tokens par étape. |
+| `src/moviegraphrag/evidence/validation.py` | `document_evidence()` : identité, snapshot, modèle, hash et sources des documents ; aucun jugement thématique. |
 | `src/moviegraphrag/evidence/context.py` | `build_context()` et `validate_generated()` : budget de contexte et validité des références finales. |
 | `src/moviegraphrag/schemas/models.py` | Tous les modèles Pydantic de requête, plan, linking, preuves, jugements, couverture et réponse ; invariants de graphe. |
 
@@ -735,20 +427,22 @@ provenant des données n’est pas exécutée comme du HTML.
 | `tests/real/test_graph.py` | Volumes, références CSV, candidats Cypher, homonymes, vecteurs natifs, scoring hybride et réingestion idempotente. |
 | `tests/real/test_linking.py` | Films ambigus, contexte explicite, personne dépendante et patronymes trop larges. |
 | `tests/real/test_clarification_replay.py` | Clarifications successives, conservation/revalidation des choix, signature, portée, expiration et types des résultats. |
-| `tests/real/test_validation.py` | Plans invalides, directions, fausses citations et centralité illégitime à partir d’un keyword. |
+| `tests/real/test_validation.py` | Plans invalides, demandes thématiques strictes refusées, intégrité documentaire et références finales. |
 | `tests/real/test_http.py` | Endpoints réels et parcours Groq graphe/hybride, citations et entité absente. |
-| `tests/real/test_groq_assessment.py` | Appel Groq réel isolé pour apprécier les preuves d’Inception. |
+| `tests/real/test_groq_generation.py` | Génération réelle Groq avec un document d’Inception récupéré depuis Neo4j. |
+| `tests/real/test_counts.py` | Comptages exacts confrontés aux CSV, comptes globaux, zéro et identités ambiguës. |
+| `tests/real/test_semantic_ranking.py` | Classement exact des 4 801 vecteurs, 254 candidats hybrides, limites et contexte borné. |
 | `tests/real/test_evaluation.py` | Références CSV, métadonnées des cas, préservation des annotations, ensemble complet et pagination HTTP. |
 | `tests/browser/package.json` | Dépendance Playwright du conteneur de test ; ce n’est pas un besoin du frontend de production. |
 | `tests/browser/playwright.config.js` | Garde Docker, navigateur headless, un worker, zéro retry, délais et rapports. |
-| `tests/browser/journeys.spec.js` | Quatre parcours réels définis : recherche/clavier, hybride mobile, clarification/absence et pagination. Non exécutés lors de la préparation précédente. |
+| `tests/browser/journeys.spec.js` | Cinq parcours réels définis : recherche/clavier, hybride mobile, clarification/absence, pagination, puis comptage et quantité explicite. Non exécutés, car l’image navigateur n’est pas installée. |
 
 ### 13.8 Documentation et dossiers de données
 
 | Fichier ou dossier | Responsabilité |
 | --- | --- |
 | `docs/architecture.md` | Résumé technique et premiers diagrammes. |
-| `docs/tests_manuels_rag.md` | Cahier de 24 cas avec questions, attentes et méthode d’évaluation. |
+| `docs/tests_manuels_rag.md` | Cahier de 29 cas avec questions, attentes et méthode d’évaluation. |
 | `docs/resultats_tests_manuels.csv` | Tableau de verdicts à remplir ; initialement NON_EXECUTE. |
 | `docs/architecture_complete_soutenance.md` | Présent dossier : explication détaillée de l’implémentation. |
 | `docs/fiche_revision_soutenance.md` | Synthèse à relire avant l’oral. |
@@ -782,196 +476,68 @@ contiennent surtout une description, sans orchestration métier :
 | `.runtime/` | Artefacts locaux de travail et de tests éventuels ; pas un service de production. |
 | `.venv/` | Ancien environnement local éventuel, ignoré ; le fonctionnement et les tests actuels utilisent Docker. |
 
-## 14. API, frontend et déploiement
 
-### Routes
+## 14. Vérification et évaluation
 
-| Route | Fonction |
+Les tests applicatifs s'exécutent uniquement dans Docker avec Neo4j, E5 et Groq réels selon le marqueur. Aucune doublure de service ni réponse interceptée n'est utilisée. Un plan signé explicite peut servir d'entrée de test sans remplacer une réponse LLM.
+
+Les références relationnelles et les comptages sont confrontés aux CSV indépendamment des requêtes Cypher. Tests principaux : quatre films Nolan–Murphy, 509 acteurs de Nolan, zéro pour une personne connue sans réalisation, comptes globaux, homonymes, limites explicites, scoring de 4 801 documents et 254 candidats, provenance et rendu de secours.
+
+Rapports de cette adaptation dans `data/reports/` :
+
+| Rapport | Résultat et portée |
 | --- | --- |
-| `GET /` | Page web. |
-| `GET /static/...` | Ressources du frontend. |
-| `GET /health` | Processus vivant. |
-| `GET /ready` | Corpus/index disponibles, clé LLM configurée, modèle chargé et compatible. |
-| `POST /questions` | Pipeline complet. |
-| `GET /entities/search` | Candidats Person, Movie ou Genre. |
-| `GET /movies/{id}` | Données sources du film, sans son embedding. |
-| `GET /docs` | Swagger généré par FastAPI. |
+| `architecture-counts-tests.xml` | 18 réussites : comptages, linking et clarifications. |
+| `architecture-ranking-tests.xml` | 47 réussites sans appels LLM : graphe réel, E5, classement et validations. Inclut une réingestion du même snapshot réutilisant les vecteurs. |
+| `architecture-final-tests.xml` | Campagne combinée avant les dernières corrections : 62 réussites et 2 échecs, sur une analyse hybride et un compte global. La réingestion était exclue de cette campagne. |
+| `architecture-provider-recheck.xml` | Les 8 scénarios fonctionnels repris réussissent : hybride, deux comptes globaux, article du film témoin et quatre quantités. Un neuvième test bas niveau échoue : il attendait à tort que le mode JSON garantisse aussi le schéma. |
+| `architecture-validation-recheck.xml` | Après correction du contrat de ce test : 12 réussites, dont la génération Groq réelle, le contrôle du mode JSON, les quantités et le refus des comptes par groupe. |
+| `architecture-http-smoke.json` | Corpus prêt, volumes conservés, page, ressources, fiche Inception et Swagger accessibles avec HTTP 200. |
 
-`/ready` ne constitue pas un appel payant de contrôle du compte Groq ; une clé
-configurée ne garantit pas sa disponibilité ni son quota. Le worker de démarrage
-charge E5 quand le corpus est prêt et vérifie modèle, révision et dimensions.
+Les premières campagnes Groq et leurs reprises intermédiaires restent conservées : elles montrent des erreurs de sortie structurée et des limites de quota rencontrées pendant l’intégration. Les deux échecs fonctionnels de la campagne combinée ont été repris avec succès après correction ; une campagne complète unique n’a pas été relancée ensuite. Le mode JSON peut fournir un document syntaxiquement valide mais incorrect pour le schéma : Pydantic doit alors le rejeter. Ce test bas niveau vérifie ce contrat ; les tests fonctionnels continuent d’exiger la bonne réponse.
 
-### État dans le navigateur
+Ruff a également validé les sources, tests et scripts d’évaluation dans Docker. Les anciens `docker-tests.xml` et `frontend-*.xml` concernent des versions précédentes. Ne pas additionner les campagnes comme une seule exécution ni les présenter comme une mesure de pertinence thématique.
 
-La question, les réponses, le token et les pages déjà vues restent en mémoire JavaScript.
-Modifier la question ou la limite réinitialise la recherche. Aucun historique
-persistant ni compte utilisateur n’est implémenté.
+`architecture-scoring.json` conserve une observation : **4 801 vecteurs scorés en 398,52 ms** pour le calcul Neo4j, le tri et la récupération des lignes. Cette mesure unique exclut l’encodage E5 de la question et les appels Groq ; elle n’établit ni p50/p95 ni une garantie de latence.
 
-Précédent utilise le cache de pages ; une nouvelle page peut refaire une demande API.
-La pagination est réservée à GRAPH. Les recommandations sémantiques exposent leur
-couverture au lieu de promettre une pagination exhaustive.
+Les parcours Playwright restent optionnels et non exécutés : leur installation a été interrompue. Le cahier manuel et sa grille doivent être remplis lors d'essais réels.
 
-### Persistance Docker
+L'évaluation conserve 80 cas, leurs familles et splits : 20 graphe, 20 vectoriels, 20 hybrides, 20 robustesse. Les demandes strictes de centralité sont maintenant attendues comme unsupported. Les annotations humaines ne sont pas écrasées. Le champ historique `answer_type` de ces cas décrit le type des identifiants de référence ; le contrat d’exécution `QuestionDraft` utilise désormais `operation` et le label de sa variable cible.
 
-| Élément | Persistance |
+Trois systèmes : graph désigne le pipeline complet ; vector la baseline sur documents ; flat la baseline avec crédits et morceaux supplémentaires. Les baselines ne génèrent pas de réponse. Les latences n'ont donc pas toutes la même portée.
+
+Mesures : exactitude des comptes/ensembles, precision@k et nDCG@k sur jugements humains, fidélité des citations, respect des contraintes, latence, coût et abstention. Le rappel sémantique exige une référence suffisamment complète. Un P@5 de 0,8 pour les quatre films exacts de Q1 ne signifie pas que la liste contient une erreur.
+
+## 15. Décisions, limites et V2
+
+| Décision | Justification |
 | --- | --- |
-| API | Image locale et code source monté en lecture seule. |
-| Neo4j | Volume nommé `neo4j_data`, contenant le graphe et les embeddings. |
-| Modèle E5 | Dossier `models/`, monté sous `/models`. |
-| CSV et rapports | Dossier `data/`, monté sous `/app/data`. |
-| Corpus d’évaluation | Dossier `evaluation/`, monté sous `/app/evaluation`. |
-| Configuration | `.env` lu par Compose ; la clé n’est pas intégrée au frontend. |
+| Neo4j seul | Identités communes pour relations, documents et vecteurs. |
+| Mapping des CSV | Relations déjà explicites et vérifiables. |
+| Un document par film | Synopsis courts, unité cohérente. |
+| Scoring exact du corpus | Supprime le plafond intermédiaire et l'approximation ANN pour ce petit corpus ; latence à mesurer. |
+| Graph First | Toutes les contraintes obligatoires précèdent la sélection sémantique. |
+| Aucune appréciation Groq intermédiaire | Réduit les décisions LLM et les appels ; ne prétend plus certifier les thèmes. |
+| Comptage et listes déterministes | Le nombre provient de la base, pas d'une estimation LLM. |
+| Reranker en V2 | Exiger un gain mesuré face à E5 seul avant de l'ajouter. |
 
-Les ports de la machine sont limités à localhost : API 8000, Neo4j Browser 7474,
-Bolt 7687. L’API contacte Neo4j par `bolt://neo4j:7687` sur le réseau Compose.
-Les services utilisent `restart: unless-stopped`.
+Limites : corpus statique ; alias incomplets ; quatre relations maximum ; pas de négation ni d'agrégats autres que les comptes prévus ; pas de comptage thématique, centralité certifiée, communauté, agent autonome, GNN ou fine-tuning.
 
-L’image `moviegraphrag:saved-20261108` conserve le code à la date de sauvegarde.
-Elle ne sauvegarde pas le volume Neo4j, les CSV, les poids du modèle ou `.env`.
-Les nouveaux documents de soutenance restent dans ce dépôt Git.
+Un classement exact n'est pas une garantie de pertinence. Aucun seuil universel de similarité n'est considéré comme preuve. Les préférences ALL/ANY sont conservées dans la requête thématique sans certifier leur satisfaction.
 
-Pour relancer l’état local existant sans installer ni reconstruire :
+La synthèse peut encore interpréter incorrectement une source. La validation des références ne démontre pas l'implication de toutes les phrases. L'analyse de question peut aussi rester incorrecte malgré un schéma valide.
 
-```powershell
-docker compose up -d --no-build --pull never
-```
+V2 : benchmark humain, reranker multilingue comparé à E5, budgets de reranking calibrés, nouveaux motifs et alias, puis ingestion incrémentale si nécessaire. Aucun reranker ne remplacera les contraintes du graphe ni un comptage exact.
 
-## 15. Budgets et gestion des erreurs
+## 16. Préparer la soutenance
 
-| Paramètre initial | Valeur | Portée réelle |
-| --- | --- | --- |
-| Fenêtre E5 | 512 tokens | Entrée du modèle d’embeddings. |
-| Dimension du vecteur | 384 | Représentation numérique d’un texte. |
-| Écriture de nœuds/relations | Lots de 500 | Ingestion. |
-| Encodage E5 | Lots de 32 | Ingestion. |
-| Évaluation des thèmes | Lots de 20 | Jusqu’à 5 lots pour un budget 100. |
-| Budget thématique | 100 candidats | Inspection des preuves, après scoring. |
-| Limite affichée | 1 à 20, défaut 5 | Contrat API ; interface propose 5, 10 ou 20. |
-| Budget du Context Builder | 24 000 caractères | JSON du contexte, pas tokens du modèle. |
-| Timeout transaction Neo4j | 5 secondes | Chaque transaction de lecture. |
-| Timeout client Groq | 60 secondes | Paramétrage HTTP, pas une garantie de latence globale. |
-| Sortie Groq `max_tokens` | 10 000 | Plafond demandé pour la réponse structurée, pas le nombre de tokens E5. |
-| Reprises réseau | Jusqu’à 3 tentatives | Par appel structuré, avec prise en compte de Retry-After. |
-| Token de clarification | 30 minutes, 65 536 caractères maximum | Session signée, invalidée au redémarrage. |
+1. Présenter les deux représentations : relations issues des CSV et vecteurs de documents.
+2. Montrer un nœud Person partagé entre rôles, Movie et Genre.
+3. Expliquer un document par film et la différence 512 tokens / 384 dimensions.
+4. Montrer les trois opérations : liste, compte et recommandation.
+5. Demander les quatre films Nolan–Murphy, puis combien d'acteurs Nolan a dirigés : 509 dans ce corpus.
+6. Montrer Q8, ses sources et le fait qu'un seul film ne doit pas être complété artificiellement.
+7. Montrer une quantité explicite : recommande trois films, même si l'interface indique dix.
+8. Reconnaître la limite thématique et montrer la demande de reformulation pour une centralité certifiée.
 
-L’analyse autorise une correction de schéma. Ensuite viennent au maximum cinq
-lots thématiques et une synthèse : le nombre d’étapes est borné. Les reprises HTTP
-et leurs délais empêchent toutefois de déduire une latence globale fixe de ces seules valeurs.
-
-Les statuts métier sont `ok`, `needs_clarification`, `entity_not_found`,
-`no_match_in_dataset`, `insufficient_evidence`, `unsupported`, `dependency_error`.
-Une réponse HTTP 200 doit donc être lue avec son champ `status`. Une demande ou
-clarification invalide peut produire HTTP 422.
-
-## 16. Évaluation : ce qui est démontré et ce qui reste à mesurer
-
-### Trois niveaux
-
-1. **Tests techniques** : schémas, crédits, IDs, index, appels réels et références.
-2. **Qualité de recherche** : exactitude des ensembles relationnels et pertinence thématique.
-3. **Qualité de réponse** : fidélité des affirmations, citations, abstention et utilité.
-
-Les références relationnelles sont calculées séparément depuis les CSV. Une
-comparaison du graphe avec une référence issue du même Cypher ne suffirait pas.
-Le cahier manuel distingue ce que l’interface/API permet effectivement d’observer.
-
-### État connu des vérifications
-
-| Rapport ou ressource | Ce qu’il établit |
-| --- | --- |
-| `docker-tests.xml` | Ancienne campagne de 29 tests techniques réussis. |
-| `frontend-backend-tests.xml` | Campagne de 34 tests : 32 réussites, 2 erreurs d’appels Groq observées. |
-| `frontend-http-tests.xml` | Reprise ciblée de 7 tests API/Groq réussis après corrections. |
-| Quatre parcours Playwright | Écrits, mais non exécutés : installation interrompue à la demande de l’utilisateur. |
-| 24 scénarios manuels | Cahier et grille fournis ; verdicts à remplir, pas un rapport automatique de réussite. |
-| 80 cas d’évaluation | 20 graphe, 20 vectoriels, 20 hybrides, 20 robustesse ; 19 références graphe vérifiées dans l’état relu, annotations thématiques à compléter. |
-
-Ne pas additionner les campagnes XML comme s’il s’agissait d’une seule exécution.
-Ne pas annoncer une précision thématique globale ou un gain GraphRAG non mesuré.
-
-### Baselines
-
-| Système du CLI | Ce qui est évalué |
-| --- | --- |
-| `graph` | Pipeline complet MovieGraphRAG, avec son Router ; pas seulement la stratégie GRAPH. |
-| `vector` | Retrieval exact local sur documents de films sans crédits ajoutés. |
-| `flat` | Retrieval exact local sur documents enrichis de crédits, avec morceaux supplémentaires si nécessaire. |
-
-Les deux baselines vectorielles ne génèrent pas de réponse et n’appellent pas le
-LLM. Elles peuvent réencoder beaucoup de documents. Leurs latences n’ont pas la
-même portée que celle du pipeline complet.
-
-Précision, rappel, exactitude d’ensemble et nDCG@5 sont utiles selon les références
-disponibles. Le rappel sémantique exige un ensemble attendu complet. Une annotation
-absente ne doit pas être transformée en note de pertinence nulle.
-Le P@5 du runner divise par cinq : quatre bons résultats attendus sur Q1 donnent
-0,8 pour cet indicateur, même si la liste est exactement correcte.
-
-## 17. Décisions à défendre et limites à reconnaître
-
-| Décision | Argument |
-| --- | --- |
-| Neo4j seul | Relations et vecteurs partagent les IDs ; une seconde base ajouterait de la synchronisation sans besoin démontré. |
-| Un document par film | Unité cohérente et synopsis courts ; pas de découpage supplémentaire sans motif lié aux données. |
-| E5 multilingue local | Questions françaises face à des textes anglais, coût d’encodage local et modèle adapté au retrieval. |
-| Graphe pour les contraintes | Une ressemblance de texte ne démontre pas une collaboration acteur–réalisateur. |
-| Graph First exact | Corpus assez petit pour scorer tous les films admissibles et préserver les contraintes. |
-| Pipeline contrôlé | Étapes, schémas, budgets et erreurs visibles ; agent autonome non nécessaire aux questions ciblées. |
-| Pas de reranker spécialisé initial | Gain non démontré ; l’étape thématique coûte déjà des appels LLM. |
-| Rendu déterministe du graphe pur | Une liste exacte et sourcée n’a pas besoin d’une reformulation LLM à chaque fois. |
-
-Limites importantes à annoncer :
-
-- corpus statique et incomplet par rapport au cinéma réel ; absence du dataset n’est pas inexistence dans le monde ;
-- motifs positifs connectés et acycliques de quatre relations maximum ;
-- négations, agrégations, plus courts chemins généraux et similarité à un film hors MVP ;
-- titres traduits et alias de personnes non enrichis de façon exhaustive ;
-- pas d’apprentissage/fine-tuning, d’ingestion incrémentale complète ou d’agent autonome ;
-- sélection thématique bornée et index ANN approximatif pour le vectoriel pur ;
-- compréhension de question et implications thématiques encore susceptibles d’erreurs ;
-- contexte exact et mode de génération non exposés comme traces dédiées ;
-- aucune preuve expérimentale d’un avantage global face aux baselines tant que les annotations manquent ;
-- déploiement local, sans gestion complète des utilisateurs, rôles et autorisations de production.
-
-Le code valide les motifs et paramètre les valeurs, mais `execute_read` n’est pas
-à lui seul une frontière de sécurité face à tout code arbitraire. L’API n’accepte
-pas de Cypher libre. Les secrets restent côté backend et sont exclus de Git.
-
-Évolutions possibles : meilleurs alias, traces de contexte/mode de réponse,
-annotations humaines, benchmark, reranker si utile, nouveaux motifs et ingestion
-incrémentale. Les stratégies hybrides alternatives restent à expérimenter.
-
-## 18. Plan de présentation et démonstration
-
-### Proposition de présentation en cinq minutes
-
-| Temps indicatif | Message et fichier à montrer |
-| --- | --- |
-| 0:00–0:45 | Besoin utilisateur, corpus et complémentarité graphe/sémantique. |
-| 0:45–1:30 | Diagramme global et schéma Person–Movie–Genre. |
-| 1:30–2:15 | `documents.py` : un film par document, tokens et absence de chunking glissant. |
-| 2:15–3:15 | `orchestration.py` puis `compiler.py` : Router, contraintes et exact scoring. |
-| 3:15–4:15 | Démonstration Q1 puis Q8 ; ouvrir les preuves d’Inception. |
-| 4:15–5:00 | Évaluation réelle, cas ambigus et limites reconnues. |
-
-### Démonstration courte, sans nouvelle installation
-
-1. Ouvrir <http://localhost:8000> et montrer l’état prêt.
-2. Demander « Quels films ont été réalisés par Christopher Nolan avec Cillian Murphy ? ».
-   Attendre les quatre films de référence et ouvrir leurs preuves.
-3. Demander « Quels films de Nolan avec DiCaprio parlent des rêves ? ».
-   Montrer les relations et la source thématique d’Inception.
-4. Si le temps le permet, demander les films avec Tom Holland et expliquer la clarification.
-5. Montrer dans Swagger `strategy`, `coverage`, `trace.plan` et les IDs de preuves.
-
-Ces questions réutilisent le vrai pipeline et son fournisseur. En cas de quota ou
-d’indisponibilité Groq, expliquer le statut observé et montrer les références et
-rapports historiques en les identifiant comme tels, sans présenter une capture
-ou une réponse préparée comme une exécution en direct.
-
-### Phrase de conclusion possible
-
-> Le principal apport du projet est de séparer les contraintes vérifiables des
-> ressemblances sémantiques. Le graphe établit les collaborations admissibles,
-> les embeddings proposent un classement, et les preuves justifient les réponses.
-> L’évaluation doit encore mesurer la pertinence thématique et le gain face aux baselines.
+> Le graphe établit les contraintes et les comptes. E5 classe les documents. Le contexte conserve les sources et chemins, et le LLM rédige sans remplacer les calculs de la base.

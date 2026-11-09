@@ -23,6 +23,8 @@ def route(plan: QuestionDraft) -> str:
     structural = bool(plan.mentions or plan.edges or plan.filters)
     if not plan.supported:
         raise ValueError("Unsupported plan")
+    if plan.operation == "count":
+        return "GRAPH"
     return "HYBRID_GRAPH_FIRST" if structural and plan.theme_request else (
         "GRAPH" if structural else "VECTOR"
     )

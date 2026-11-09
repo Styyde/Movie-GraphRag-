@@ -34,7 +34,9 @@ class EntityLinker:
             if mention.year is not None:
                 candidates = [c for c in candidates if c.year == mention.year]
                 context.append(f"release_year={mention.year}")
-            if mention.role:
+            unique_exact_identity = (len(candidates) == 1 and candidates[0].method == "exact"
+                                     and not mention.context_movie_ref)
+            if mention.role and not unique_exact_identity:
                 candidates = [c for c in candidates if mention.role in c.roles]
                 context.append(f"role={mention.role}")
             if mention.context_movie_ref:

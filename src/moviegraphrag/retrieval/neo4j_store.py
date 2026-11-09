@@ -132,6 +132,12 @@ class Neo4jStore:
                          f"coalesce({cq.target}.title,{cq.target}.name) AS name ORDER BY id", cq.parameters)
         return rows, cq.template_id
 
+    def graph_count(self, plan: QuestionDraft, bindings: dict[str, int]) -> tuple[int, str]:
+        cq = compile_graph(plan, bindings)
+        # No grouping key and no LIMIT: a valid anchor with no matches returns zero.
+        rows = self.read(cq.prefix + f" RETURN count(DISTINCT {cq.target}) AS count", cq.parameters)
+        return rows[0]["count"], cq.template_id
+
     def witnesses(self, plan: QuestionDraft, bindings: dict[str, int], entity_id: int):
         cq = compile_graph(plan, bindings)
         prop = ID_PROPERTIES[next(v.label for v in plan.variables if v.ref == plan.target)]

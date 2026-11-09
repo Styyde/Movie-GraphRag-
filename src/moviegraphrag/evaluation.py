@@ -243,7 +243,7 @@ def graph_set_metrics(store, response, case):
     actual = {row["id"] for row in rows}
     expected = {int(entity_id) for entity_id, grade in case.get("relevance", {}).items() if grade > 0}
     page_consistent = ([r["id"] for r in response.results]
-                       == [r["id"] for r in rows[:plan.limit]])
+                       == [r["id"] for r in rows[:response.coverage.effective_limit]])
     page_consistent = page_consistent and response.coverage.total_candidates == len(rows)
     return {"metric_scope": "complete_graph_retrieval", "exact_set_match": actual == expected,
             "precision": len(actual & expected) / len(actual) if actual else float(not expected),

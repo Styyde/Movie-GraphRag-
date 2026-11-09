@@ -59,7 +59,7 @@ class ThemeRequest(StrictModel):
 class QuestionDraft(StrictModel):
     supported: bool = True
     unsupported_reason: str | None = None
-    answer_type: Literal["movie_list", "person_list"] = "movie_list"
+    operation: Literal["list", "count", "recommend"] = "list"
     mentions: list[Mention] = Field(default_factory=list, max_length=8)
     variables: list[Variable] = Field(default_factory=list, max_length=6,
         description="Declare every edge endpoint and the target, including every entity mention binding. Never empty for a supported plan.")
@@ -68,7 +68,7 @@ class QuestionDraft(StrictModel):
     filters: list[Filter] = Field(default_factory=list, max_length=8)
     theme_request: ThemeRequest | None = None
     distinct_movies: list[tuple[str, str]] = Field(default_factory=list, max_length=2)
-    limit: int = Field(default=5, ge=1, le=20)
+    requested_limit: int | None = Field(default=None, ge=1)
 
     @model_validator(mode="after")
     def validate_graph(self):
@@ -80,9 +80,9 @@ class QuestionDraft(StrictModel):
         ms = {m.ref: m for m in self.mentions}
         if len(vs) != len(self.variables) or len(ms) != len(self.mentions):
             raise ValueError("Duplicate references")
-        expected = Label.MOVIE if self.answer_type == "movie_list" else Label.PERSON
-        if self.target not in vs or vs[self.target].label != expected:
+        if self.target not in vs or vs[self.target].label not in {Label.MOVIE, Label.PERSON}:
             raise ValueError("Target has wrong label or is missing")
+        expected = vs[self.target].label
         used_mentions = set()
         for v in self.variables:
             if v.mention_ref:
@@ -147,10 +147,22 @@ class QuestionDraft(StrictModel):
             ):
                 raise ValueError("Invalid distinct-movie constraint")
         structural = bool(self.mentions or self.edges or self.filters)
-        if structural and not (self.mentions or self.filters):
+        global_count = self.operation == "count" and (
+            (len(vs) == 1 and not self.edges) or
+            (len(self.edges) == 1 and expected == Label.PERSON
+             and self.edges[0].source == self.target
+             and self.edges[0].relation in {Relation.ACTED_IN, Relation.DIRECTED})
+        )
+        if structural and not (self.mentions or self.filters) and not global_count:
             raise ValueError("Graph patterns need an anchor")
-        if not structural and not self.theme_request:
+        if not structural and not self.theme_request and not global_count:
             raise ValueError("Empty question plan")
+        if self.operation == "recommend" and not self.theme_request:
+            raise ValueError("Recommendations require a thematic query")
+        if self.theme_request and self.operation != "recommend":
+            raise ValueError("Thematic counts and lists are unsupported; use recommendations")
+        if self.theme_request and self.theme_request.requirement == "central":
+            raise ValueError("Centrality is not verified; reformulate as thematic recommendations")
         if self.theme_request and expected != Label.MOVIE:
             raise ValueError("Semantic person retrieval is outside the MVP")
         if self.theme_request and len(set(self.theme_request.themes)) != len(self.theme_request.themes):
@@ -225,8 +237,8 @@ class GeneratedAnswer(StrictModel):
 
 class Evidence(StrictModel):
     id: str
-    kind: Literal["relation", "overview", "keyword"]
-    entity_id: int
+    kind: Literal["relation", "overview", "keyword", "document", "aggregate"]
+    entity_id: int | None = Field(default=None, gt=0)
     data: dict
 
 
@@ -240,12 +252,16 @@ class Coverage(StrictModel):
     approximate: bool = False
     offset: int = 0
     has_more: bool = False
+    effective_limit: int | None = Field(default=5, ge=1, le=20)
 
 
 class AnswerResponse(StrictModel):
     status: Literal["ok", "needs_clarification", "entity_not_found", "no_match_in_dataset",
                     "insufficient_evidence", "unsupported", "dependency_error"]
     strategy: Literal["GRAPH", "VECTOR", "HYBRID_GRAPH_FIRST"] | None = None
+    operation: Literal["list", "count", "recommend"] | None = None
+    count: int | None = Field(default=None, ge=0)
+    thematic_verification: Literal["not_performed", "not_applicable"] = "not_applicable"
     resolved_entities: list[LinkResult] = Field(default_factory=list)
     clarification_token: str | None = None
     results: list[dict] = Field(default_factory=list)
@@ -255,3 +271,11 @@ class AnswerResponse(StrictModel):
     warnings: list[str] = Field(default_factory=list)
     trace_id: str
     trace: dict = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_count(self):
+        if self.count is not None and (self.operation != "count" or self.results):
+            raise ValueError("Counts are separate from result lists")
+        if self.status == "ok" and self.operation == "count" and self.count is None:
+            raise ValueError("A successful count needs an exact value")
+        return self

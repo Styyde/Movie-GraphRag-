@@ -12,6 +12,7 @@ from pydantic import ValidationError
 from moviegraphrag.llm.prompts import ANALYZER, ASSESSOR, GENERATOR
 from moviegraphrag.examples import QUESTIONS, reference_plan
 from moviegraphrag.ingestion.dataset import normalize
+from moviegraphrag.quantities import validate_quantity
 from moviegraphrag.schemas.models import AssessmentBatch, GeneratedAnswer, QuestionDraft
 
 logger = logging.getLogger(__name__)
@@ -40,6 +41,7 @@ class Usage:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     models: set[str] = field(default_factory=set)
+    stages: dict[str, int] = field(default_factory=dict)
 
     def report(self, settings):
         cost = None
@@ -48,7 +50,7 @@ class Usage:
                     self.completion_tokens * settings.llm_output_usd_per_million) / 1_000_000
         return {"calls": self.calls, "prompt_tokens": self.prompt_tokens,
                 "completion_tokens": self.completion_tokens, "models": sorted(self.models),
-                "estimated_cost_usd": cost}
+                "estimated_cost_usd": cost, "stages": self.stages}
 
 
 def strict_schema(schema):
@@ -90,6 +92,7 @@ class GroqLLM:
         retry_deadline = time.monotonic() + 60
         for attempt in range(3):
             usage.calls += 1
+            usage.stages[schema.__name__] = usage.stages.get(schema.__name__, 0) + 1
             try:
                 response = self.client.post("/chat/completions", json=request, headers={
                     "Authorization": "Bearer " + self.settings.groq_api_key.get_secret_value()})
@@ -135,15 +138,25 @@ class GroqLLM:
             "Each mentioned entity must be bound using mention_ref. Never return an empty variables array.\n" \
             + "\n".join("Worked example question: " + QUESTIONS[k] + "\nValid plan: " +
                         reference_plan(k).model_dump_json() for k in ("Q1", "Q4", "Q9"))
+        count_example = reference_plan("Q1").model_dump()
+        count_example["operation"] = "count"
+        system += ("\nWorked example question: Combien de films ont ete realises par Christopher Nolan "
+                   "avec Cillian Murphy ?\nValid plan: " + json.dumps(count_example))
         for attempt in range(2):
             try:
                 plan = self.structured(QuestionDraft, system, payload, usage)
+                if not plan.supported:
+                    return plan
                 original = normalize(question)
                 for mention in plan.mentions:
                     if normalize(mention.text) not in original:
                         raise ValueError("Entity mentions must be literal question excerpts; never expand names or translate genres.")
                     if mention.year is not None and str(mention.year) not in question:
                         raise ValueError("An identifying year must be explicitly present in the question.")
+                if plan.operation == "count":
+                    plan.requested_limit = None
+                else:
+                    plan.requested_limit = validate_quantity(question, plan.requested_limit)
                 return plan
             except (ValidationError, ValueError) as exc:
                 if attempt:

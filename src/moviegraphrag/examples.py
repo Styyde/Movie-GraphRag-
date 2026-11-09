@@ -17,7 +17,7 @@ QUESTIONS = {
 
 def reference_plan(key: str) -> QuestionDraft:
     mentions, variables, edges = [], [{"ref": "result", "label": "Movie"}], []
-    answer_type, theme = "movie_list", None
+    theme = None
     def bind(ref, text, label="Person", role=None):
         mentions.append({"ref": "mention_" + ref, "text": text, "type": label, "role": role})
         variables.append({"ref": ref, "label": label, "mention_ref": "mention_" + ref})
@@ -34,7 +34,6 @@ def reference_plan(key: str) -> QuestionDraft:
             theme = thematic("films parlant des rêves", ["rêves"])
     elif key in {"Q2", "Q3", "Q4"}:
         variables = [{"ref": "result", "label": "Person"}, {"ref": "witness", "label": "Movie"}]
-        answer_type = "person_list"
         if key == "Q3":
             bind("director", "Christopher Nolan", role="director")
             edge("director", "DIRECTED", "witness")
@@ -66,5 +65,6 @@ def reference_plan(key: str) -> QuestionDraft:
         theme = thematic(QUESTIONS[key], ts)
     else:
         raise ValueError(key)
-    return QuestionDraft(mentions=mentions, variables=variables, edges=edges, answer_type=answer_type,
+    return QuestionDraft(mentions=mentions, variables=variables, edges=edges,
+                         operation="recommend" if theme else "list",
                          theme_request=theme)

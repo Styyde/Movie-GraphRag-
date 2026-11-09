@@ -27,7 +27,8 @@ class MovieGraphRAG:
     def ask(self, request: QuestionRequest) -> AnswerResponse:
         started = time.perf_counter()
         trace_id, usage = str(uuid.uuid4()), Usage()
-        trace = {"prompt_version": PROMPT_VERSION, "pipeline_version": "controlled-v1"}
+        trace = {"prompt_version": PROMPT_VERSION, "pipeline_version": "controlled-v2",
+                 "generation_mode": "deterministic"}
         response = None
         try:
             response = self._ask(request, trace_id, usage, trace)
@@ -64,7 +65,12 @@ class MovieGraphRAG:
             if request.selections:
                 raise ValueError("Selections require a clarification token")
             plan = self.llm.analyze(request.question, usage)
-        plan.limit = request.limit
+        limit = min(plan.requested_limit or request.limit, 20)
+        warnings = []
+        if plan.operation != "count" and plan.requested_limit and plan.requested_limit > 20:
+            warnings.append("La quantité demandée est limitée à 20 résultats par réponse.")
+        trace["requested_limit"] = plan.requested_limit
+        trace["effective_limit"] = None if plan.operation == "count" else limit
         trace["plan"] = plan.model_dump(mode="json")
         if not plan.supported:
             return AnswerResponse(status="unsupported", answer=plan.unsupported_reason, trace_id=trace_id)
@@ -86,13 +92,27 @@ class MovieGraphRAG:
         bindings = {r.mention.ref: r.canonical_id for r in links}
         strategy = route(plan)
         result_type = next(variable.label.value for variable in plan.variables if variable.ref == plan.target)
-        coverage = Coverage(offset=request.offset)
-        warnings = []
+        coverage = Coverage(offset=request.offset, effective_limit=None if plan.operation == "count" else limit)
+        if plan.operation == "count":
+            if request.offset:
+                raise ValueError("Counts are not pageable; offset must be zero")
+            count, template_id = self.store.graph_count(plan, bindings)
+            trace.update(template_id=template_id, bindings=bindings, selection_method="exact_graph_count")
+            coverage.total_candidates = count
+            proof = Evidence(id="a-count", kind="aggregate", data={
+                "operation": "count_distinct", "value": count, "target_type": result_type,
+                "template_id": template_id, "bindings": bindings,
+                "snapshot_id": manifest["snapshot_id"], "source_hashes": trace["source_hashes"],
+            })
+            return AnswerResponse(status="ok", operation="count", strategy="GRAPH", count=count,
+                                  resolved_entities=links, evidence=[proof], coverage=coverage,
+                                  answer=f"Dans ce dataset : {count} résultat(s) distinct(s). [a-count]",
+                                  trace_id=trace_id)
         if strategy == "GRAPH":
             candidates, template_id = self.store.graph_candidates(plan, bindings)
             trace["template_id"], trace["bindings"] = template_id, bindings
             coverage.total_candidates = len(candidates)
-            page = candidates[request.offset:request.offset + request.limit]
+            page = candidates[request.offset:request.offset + limit]
             coverage.has_more = request.offset + len(page) < len(candidates)
             results, evidence = [], []
             for c in page:
@@ -139,7 +159,7 @@ class MovieGraphRAG:
                     -sum(j.source in {"overview", "both"} for j in pair[0].judgments),
                     -by_id[pair[0].movie_id]["score"], pair[0].movie_id))
                 for assessment, proofs in accepted:
-                    if len(results) >= request.limit:
+                    if len(results) >= limit:
                         break
                     c = by_id[assessment.movie_id]
                     if strategy == "HYBRID_GRAPH_FIRST":
@@ -149,7 +169,7 @@ class MovieGraphRAG:
                     results.append({**c, "type": result_type,
                                     "judgments": [j.model_dump() for j in assessment.judgments],
                                     "evidence_ids": [e.id for e in proofs]})
-                if len(results) >= request.limit:
+                if len(results) >= limit:
                     break
             incomplete = (coverage.approximate or coverage.examined < len(candidates)
                           or coverage.without_embedding > 0)
@@ -180,6 +200,7 @@ class MovieGraphRAG:
         else:
             answer = ("Aucun résultat dans ce dataset pour les contraintes demandées." if status == "no_match_in_dataset"
                       else "Preuves thématiques insuffisantes parmi les candidats examinés.")
-        return AnswerResponse(status=status, strategy=strategy, resolved_entities=links, results=results,
+        return AnswerResponse(status=status, strategy=strategy, operation=plan.operation,
+                              resolved_entities=links, results=results,
                               answer=answer, evidence=evidence, coverage=coverage, warnings=warnings,
                               trace_id=trace_id)

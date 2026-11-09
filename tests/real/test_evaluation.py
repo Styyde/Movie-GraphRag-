@@ -74,9 +74,11 @@ def test_real_graph_complete_set_metric_and_http_pagination(api, store, cases, g
     assert complete["first_page_consistent"]
     assert complete["actual_count"] == 17
     second = AnswerResponse.model_validate(api.post("/questions", json={
-        "question": case["question"], "limit": 20, "offset": 5}).json())
+        "question": case["question"], "limit": 20, "offset": 5,
+        "clarification_token": first.clarification_token}).json())
     assert second.status == "ok", second
     ids = [row["id"] for row in first.results + second.results]
     assert len(ids) == len(set(ids)) == 17
     assert set(ids) == {int(entity_id) for entity_id in case["relevance"]}
     assert not second.coverage.has_more
+    assert second.trace["llm_usage"]["calls"] == 0

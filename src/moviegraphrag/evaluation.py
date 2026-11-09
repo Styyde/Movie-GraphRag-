@@ -312,7 +312,7 @@ def evaluate(args, settings):
                 errors = [w for w in response.warnings]
                 latency_ms = (time.perf_counter() - started) * 1000
                 complete_set = graph_set_metrics(store, response, case)
-                algorithm = {"GRAPH": "exact_graph_constraints", "VECTOR": "neo4j_approximate_vector_index",
+                algorithm = {"GRAPH": "exact_graph_constraints", "VECTOR": "exact_cosine_all_encoded_movies",
                              "HYBRID_GRAPH_FIRST": "exact_graph_constraints_and_exact_candidate_cosine"}.get(
                                  response.strategy, "no_retrieval")
                 coverage = response.coverage.model_dump()

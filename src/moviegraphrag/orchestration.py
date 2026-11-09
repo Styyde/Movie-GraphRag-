@@ -7,7 +7,7 @@ from neo4j.exceptions import Neo4jError, ServiceUnavailable
 from pydantic import ValidationError
 
 from moviegraphrag.evidence.context import build_context, validate_generated
-from moviegraphrag.evidence.validation import validate_assessments
+from moviegraphrag.evidence.validation import document_evidence
 from moviegraphrag.linking.clarifications import Clarifications
 from moviegraphrag.linking.linker import EntityLinker
 from moviegraphrag.llm.groq import Usage
@@ -109,6 +109,7 @@ class MovieGraphRAG:
                                   answer=f"Dans ce dataset : {count} résultat(s) distinct(s). [a-count]",
                                   trace_id=trace_id)
         if strategy == "GRAPH":
+            trace["selection_method"] = "exact_graph_constraints"
             candidates, template_id = self.store.graph_candidates(plan, bindings)
             trace["template_id"], trace["bindings"] = template_id, bindings
             coverage.total_candidates = len(candidates)
@@ -132,50 +133,34 @@ class MovieGraphRAG:
                 structural, template_id = self.store.graph_candidates(plan, bindings)
                 trace["template_id"], trace["bindings"] = template_id, bindings
                 coverage.total_candidates = len(structural)
+                scoring_started = time.perf_counter()
                 candidates = self.store.exact_scores([c["id"] for c in structural], vector) if structural else []
                 coverage.scored = len(candidates)
                 coverage.without_embedding = len(structural) - len(candidates)
             else:
                 coverage.total_candidates = manifest["counts"]["movies"]
-                coverage.without_embedding = manifest["counts"]["movies"] - manifest["embedded_documents"]
-                candidates = self.store.vector_candidates(vector, self.settings.semantic_budget)
+                scoring_started = time.perf_counter()
+                candidates = self.store.exact_scores(None, vector)
                 coverage.scored = len(candidates)
-                coverage.approximate = True
+                coverage.without_embedding = coverage.total_candidates - coverage.scored
+            trace.update(selection_method="exact_cosine", scoring_ms=round((time.perf_counter() - scoring_started) * 1000, 2),
+                         ranking_scope="structural_candidates" if strategy == "HYBRID_GRAPH_FIRST" else "corpus")
             results, evidence = [], []
-            budget = min(len(candidates), self.settings.semantic_budget)
-            for start in range(0, budget, self.settings.evidence_batch_size):
-                batch = candidates[start:min(start + self.settings.evidence_batch_size, budget)]
-                movies = [self.store.movie(c["id"]) for c in batch]
-                records = [{k: m.get(k) for k in ("movie_id", "title", "overview", "keywords",
-                                                  "keyword_ids", "snapshot_id", "text_coverage")} for m in movies]
-                assessed = self.llm.assess(plan.theme_request, records, usage)
-                try:
-                    accepted = validate_assessments(assessed, records, plan.theme_request)
-                except ValueError as exc:
-                    raise RuntimeError("Invalid thematic evidence returned by the model") from exc
-                coverage.examined += len(batch)
-                by_id = {c["id"]: c for c in batch}
-                accepted.sort(key=lambda pair: (
-                    -sum(j.source in {"overview", "both"} for j in pair[0].judgments),
-                    -by_id[pair[0].movie_id]["score"], pair[0].movie_id))
-                for assessment, proofs in accepted:
-                    if len(results) >= limit:
-                        break
-                    c = by_id[assessment.movie_id]
-                    if strategy == "HYBRID_GRAPH_FIRST":
-                        proofs.append(Evidence(id=f"g{c['id']}", kind="relation", entity_id=c["id"],
-                                               data=self.store.witnesses(plan, bindings, c["id"])))
-                    evidence.extend(proofs)
-                    results.append({**c, "type": result_type,
-                                    "judgments": [j.model_dump() for j in assessment.judgments],
-                                    "evidence_ids": [e.id for e in proofs]})
+            for c in candidates:
                 if len(results) >= limit:
                     break
-            incomplete = (coverage.approximate or coverage.examined < len(candidates)
-                          or coverage.without_embedding > 0)
-            coverage.semantic_coverage = "partial" if incomplete else "complete"
-            if coverage.semantic_coverage == "partial":
-                warnings.append("Sélection sémantique partielle ; aucune exhaustivité n'est garantie.")
+                coverage.sources_checked += 1
+                proof = document_evidence(self.store.movie(c["id"]), c["id"], manifest)
+                if proof is None:
+                    continue
+                proofs = [proof]
+                if strategy == "HYBRID_GRAPH_FIRST":
+                    proofs.append(Evidence(id=f"g{c['id']}", kind="relation", entity_id=c["id"],
+                                           data=self.store.witnesses(plan, bindings, c["id"])))
+                evidence.extend(proofs)
+                results.append({**c, "type": result_type, "evidence_ids": [e.id for e in proofs]})
+            coverage.ranking_coverage = "partial" if coverage.without_embedding else "complete"
+            warnings.append("Recommandations classées par similarité ; pertinence thématique et centralité non certifiées.")
             if coverage.without_embedding:
                 warnings.append(f"{coverage.without_embedding} film(s) sans embedding thématique.")
         coverage.returned = len(results)
@@ -184,23 +169,29 @@ class MovieGraphRAG:
         context, truncated = build_context(results, evidence, coverage, self.settings.context_char_budget,
                                            {"question": request.question, "language": request.language,
                                             "theme_request": plan.theme_request.model_dump() if plan.theme_request else None})
+        trace["context_truncated"] = truncated
+        trace["context_evidence_ids"] = [e["id"] for e in context["evidence"]]
         if truncated:
             warnings.append("Contexte de synthèse limité ; les résultats structurés conservent toutes leurs preuves.")
         if results:
             answer = "\n".join(f"- {r['name']} " + " ".join(f"[{i}]" for i in r["evidence_ids"])
                                for r in results)
             if strategy != "GRAPH":
-                answer += "\nLes annotations keywords indiquent une association, sans prouver la centralité."
+                answer += "\nRecommandations par similarité ; la pertinence thématique et la centralité ne sont pas certifiées."
             if strategy != "GRAPH" and self.settings.synthesis_enabled and context["results"] and not truncated:
                 try:
                     generated = self.llm.generate(context, usage)
                     answer = validate_generated(generated, context["evidence"])
+                    trace["generation_mode"] = "llm_synthesis"
                 except (ValueError, RuntimeError, httpx.HTTPError):
                     warnings.append("Synthèse indisponible ou invalide ; rendu déterministe utilisé.")
         else:
             answer = ("Aucun résultat dans ce dataset pour les contraintes demandées." if status == "no_match_in_dataset"
-                      else "Preuves thématiques insuffisantes parmi les candidats examinés.")
+                      else "Sources disponibles insuffisantes pour produire des recommandations.")
         return AnswerResponse(status=status, strategy=strategy, operation=plan.operation,
+                              thematic_verification="not_performed" if plan.operation == "recommend" else "not_applicable",
+                              clarification_token=self.clarifications.issue(request.question, plan, links)
+                              if plan.operation == "list" else None,
                               resolved_entities=links, results=results,
                               answer=answer, evidence=evidence, coverage=coverage, warnings=warnings,
                               trace_id=trace_id)

@@ -209,23 +209,6 @@ class QuestionRequest(StrictModel):
     clarification_token: str | None = None
 
 
-class ThemeJudgment(StrictModel):
-    theme: str
-    source: Literal["overview", "keyword", "both", "none"]
-    centrality: Literal["central", "peripheral", "unknown"]
-    overview_quote: str | None = None
-    keyword_ids: list[int] = Field(default_factory=list)
-
-
-class FilmAssessment(StrictModel):
-    movie_id: int
-    judgments: list[ThemeJudgment] = Field(min_length=1, max_length=5)
-
-
-class AssessmentBatch(StrictModel):
-    films: list[FilmAssessment] = Field(min_length=1, max_length=20)
-
-
 class CitationStatement(StrictModel):
     text: str
     evidence_ids: list[str] = Field(min_length=1)
@@ -237,7 +220,7 @@ class GeneratedAnswer(StrictModel):
 
 class Evidence(StrictModel):
     id: str
-    kind: Literal["relation", "overview", "keyword", "document", "aggregate"]
+    kind: Literal["relation", "document", "aggregate"]
     entity_id: int | None = Field(default=None, gt=0)
     data: dict
 
@@ -245,10 +228,10 @@ class Evidence(StrictModel):
 class Coverage(StrictModel):
     total_candidates: int = 0
     scored: int = 0
-    examined: int = 0
+    sources_checked: int = 0
     returned: int = 0
     without_embedding: int = 0
-    semantic_coverage: Literal["not_applicable", "complete", "partial"] = "not_applicable"
+    ranking_coverage: Literal["not_applicable", "complete", "partial"] = "not_applicable"
     approximate: bool = False
     offset: int = 0
     has_more: bool = False

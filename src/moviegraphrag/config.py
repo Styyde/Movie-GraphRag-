@@ -13,8 +13,6 @@ class Settings(BaseSettings):
     embedding_model: str = "intfloat/multilingual-e5-small"
     embedding_revision: str = "main"
     query_timeout: float = Field(default=5, gt=0)
-    semantic_budget: int = Field(default=100, ge=1, le=100)
-    evidence_batch_size: int = Field(default=20, ge=1, le=20)
     context_char_budget: int = Field(default=24000, ge=2000)
     synthesis_enabled: bool = True
     llm_input_usd_per_million: float | None = None

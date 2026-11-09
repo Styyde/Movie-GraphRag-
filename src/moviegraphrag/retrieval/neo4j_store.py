@@ -159,8 +159,9 @@ class Neo4jStore:
         row["nodes"] = [{k: v for k, v in node.items() if k in identity_keys} for node in row["nodes"]]
         return row
 
-    def exact_scores(self, ids: list[int], vector: list[float]):
-        return self.read("MATCH (m:Movie) WHERE m.movie_id IN $ids AND m.embedding IS NOT NULL "
+    def exact_scores(self, ids: list[int] | None, vector: list[float]):
+        restriction = "m.movie_id IN $ids AND " if ids is not None else ""
+        return self.read("MATCH (m:Movie) WHERE " + restriction + "m.embedding IS NOT NULL "
                          "RETURN m.movie_id AS id, m.title AS name, "
                          "vector.similarity.cosine(m.embedding,$vector) AS score "
                          "ORDER BY score DESC, id", {"ids": ids, "vector": vector})

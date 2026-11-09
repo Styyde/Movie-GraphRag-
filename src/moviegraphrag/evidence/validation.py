@@ -1,46 +1,31 @@
+"""Check source integrity without asking a model to judge thematic relevance."""
+import hashlib
+
 from moviegraphrag.schemas.models import Evidence
 
 
-def validate_assessments(batch, movies, request):
-    expected = {m["movie_id"]: m for m in movies}
-    if len(batch.films) != len(expected) or {f.movie_id for f in batch.films} != set(expected):
-        raise ValueError("Assessment must cover exactly the supplied movies")
-    accepted = []
-    for film in batch.films:
-        movie = expected[film.movie_id]
-        if len(film.judgments) != len(request.themes) or {
-            j.theme for j in film.judgments
-        } != set(request.themes):
-            raise ValueError("Assessment must cover every requested theme exactly once")
-        evidence, flags = [], []
-        keyword_map = dict(zip(movie.get("keyword_ids", []), movie.get("keywords", []), strict=True))
-        for i, j in enumerate(film.judgments):
-            has_quote = j.source in {"overview", "both"}
-            has_keywords = j.source in {"keyword", "both"}
-            if has_quote:
-                if not j.overview_quote or not j.overview_quote.strip() or j.overview_quote not in movie["overview"]:
-                    raise ValueError("Overview quote is not an exact source excerpt")
-                evidence.append(Evidence(id=f"m{film.movie_id}-t{i}-overview", kind="overview",
-                                         entity_id=film.movie_id,
-                                         data={"theme": j.theme, "quote": j.overview_quote,
-                                               "centrality": j.centrality,
-                                               "snapshot_id": movie.get("snapshot_id")}))
-            elif j.overview_quote:
-                raise ValueError("Unexpected overview quotation")
-            if has_keywords:
-                if not j.keyword_ids or any(k not in keyword_map for k in j.keyword_ids):
-                    raise ValueError("Keyword citation not found")
-                evidence.append(Evidence(id=f"m{film.movie_id}-t{i}-keyword", kind="keyword",
-                                         entity_id=film.movie_id, data={"theme": j.theme,
-                                         "keywords": [{"id": k, "name": keyword_map[k]} for k in j.keyword_ids],
-                                         "centrality": "unknown", "snapshot_id": movie.get("snapshot_id")}))
-            elif j.keyword_ids:
-                raise ValueError("Unexpected keyword citations")
-            if not has_quote and j.centrality != "unknown":
-                raise ValueError("Keywords alone cannot establish centrality")
-            valid = j.source != "none" and (request.requirement != "central" or j.centrality == "central")
-            flags.append(valid)
-        keep = all(flags) if request.operator == "ALL" else any(flags)
-        if keep:
-            accepted.append((film, evidence))
-    return accepted
+def document_evidence(movie: dict | None, movie_id: int, manifest: dict) -> Evidence | None:
+    if not movie or movie.get("movie_id") != movie_id:
+        raise RuntimeError("Ranked movie is missing or has a different identity")
+    if movie.get("snapshot_id") != manifest["snapshot_id"]:
+        raise RuntimeError("Document belongs to another snapshot")
+    indexed = manifest["embedding"]
+    if (movie.get("embedding_model") != indexed["model"]
+            or movie.get("embedding_revision") != indexed["revision"]):
+        raise RuntimeError("Document embedding version differs from the snapshot")
+    text = movie.get("document_text")
+    if not text or hashlib.sha256(text.encode()).hexdigest() != movie.get("document_hash"):
+        raise RuntimeError("Document text or hash is invalid")
+    overview = movie.get("overview", "")
+    names, ids = movie.get("keywords", []), movie.get("keyword_ids", [])
+    if len(names) != len(ids):
+        raise RuntimeError("Keyword source IDs do not match the names")
+    if not overview.strip() and not names:
+        return None
+    return Evidence(id=f"d{movie_id}", kind="document", entity_id=movie_id, data={
+        "movie_id": movie_id, "title": movie["title"], "overview": overview,
+        "keywords": [{"id": key, "name": name} for key, name in zip(ids, names, strict=True)],
+        "genre_names": movie.get("genre_names", []), "text_coverage": movie.get("text_coverage"),
+        "document_hash": movie["document_hash"], "document_version": movie.get("document_version"),
+        "snapshot_id": movie["snapshot_id"], "thematic_verification": "not_performed",
+    })

@@ -19,7 +19,7 @@ NUMBER_WORDS = {
 NUMBER = r"(?:\d+|" + "|".join(sorted(NUMBER_WORDS, key=len, reverse=True)) + r")"
 PREFIX = (r"(?:recommande\w*|propose\w*|trouve\w*|donne\w*|affiche\w*|liste\w*|"
           r"montre\w*|cherche\w*|voudrais|souhaite\w*|recommend\w*|give|show|find|list|"
-          r"quels? sont|quelles? sont|what are)")
+          r"veux|aimerais|want|would like|quels? sont|quelles? sont|what are)")
 FILLER = r"(?:(?:moi|nous|me|us|les|des|the|exactement|seulement|juste|only|exactly)\s+)*"
 NOUN = r"(?:films?|movies?|acteurs?|actors?|realisateurs?|directors?|personnes?|people|titres?)\b"
 PATTERN = re.compile(r"\b" + PREFIX + r"[\s-]+" + FILLER + r"(?P<n>" + NUMBER + r")\s+"
@@ -42,9 +42,15 @@ def validate_quantity(question: str, requested: int | None) -> int | None:
     if explicit is not None:
         return explicit
     if requested is not None:
-        # Other phrasings remain possible, but the quantity must have a literal basis.
-        text = normalize(question)
-        tokens = {str(requested)} | {word for word, n in NUMBER_WORDS.items() if n == requested}
-        if not any(re.search(r"\b" + re.escape(token) + r"\b", text) for token in tokens):
-            raise ValueError("Requested limit must be explicitly present in the question")
+        # An isolated article ('un film') or year elsewhere is not a display request.
+        raise ValueError("No explicit result quantity was identified; requested_limit must be null")
     return requested
+
+
+def asks_count(question: str) -> bool:
+    return bool(re.search(r"\b(?:combien|nombre de|nombre d[' ]|how many|number of)\b", normalize(question)))
+
+
+def requires_centrality(question: str) -> bool:
+    return bool(re.search(r"\b(?:centres? sur|centrees? sur|themes? centra(?:l|ux)|central theme|"
+                          r"centered on|centred on)\b", normalize(question)))

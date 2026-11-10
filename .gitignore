@@ -1,15 +1,66 @@
+# Configuration locale et secrets
+.env
+.env.*
+!.env.example
+.envrc
+
+# Environnements Python, caches et distributions
 .venv/
+venv/
+env/
 __pycache__/
-*.pyc
+*.py[cod]
+*.egg-info/
 .pytest_cache/
 .ruff_cache/
-*.egg-info/
-.env
-data/raw/*
-!data/raw/.gitkeep
-data/reports/*
-!data/reports/.gitkeep
-evaluation/reports/*
-!evaluation/reports/.gitkeep
-models/
-.runtime/
+.mypy_cache/
+.tox/
+.nox/
+/build/
+/dist/
+
+# Tests locaux et leurs outils
+/tests/
+/Dockerfile.browser-tests
+test_*.py
+*_test.py
+conftest.py
+*.spec.js
+*.test.js
+node_modules/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+playwright-report/
+test-results/
+
+# Dossiers de travail : architecture détaillée, révisions et tests manuels
+# La documentation destinée au dépôt est regroupée dans README.md.
+/docs/
+
+# Données sources et rapports générés (conserver les dossiers d'accueil)
+/data/raw/*
+!/data/raw/.gitkeep
+/data/reports/*
+!/data/reports/.gitkeep
+/evaluation/reports/*
+!/evaluation/reports/.gitkeep
+tmdb_5000_movies.csv
+tmdb_5000_credits.csv
+
+# Poids des modèles, traces et artefacts d'exécution
+/models/
+/.runtime/
+*.log
+
+# Configuration des éditeurs et fichiers temporaires du système
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.tmp
+*.bak
+*.swp
+*~

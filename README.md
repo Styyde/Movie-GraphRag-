@@ -1,55 +1,328 @@
 # MovieGraphRAG
 
-Explorez **4 803 films** en français : collaborations entre acteurs et réalisateurs,
-genres et thèmes des synopsis. Chaque résultat donne accès aux sources qui l'expliquent.
+**Exploration du cinéma en langage naturel : graphe de connaissances, recherche sémantique multilingue et réponses avec sources.**
 
-Neo4j vérifie les relations, les embeddings multilingues E5 classent les candidats,
-et Groq analyse les questions puis peut rédiger les recommandations dans un pipeline contrôlé.
+MovieGraphRAG permet d'interroger **4 803 films du corpus TMDB 5000** en français.
+La solution associe les relations structurées de **Neo4j**, les embeddings locaux
+**E5 multilingues** et un **LLM accessible via Groq** pour retrouver des films,
+explorer des collaborations et expliquer les résultats à partir des données sources.
 
-## fonctionnalités
+> **Problématique :** comment répondre à une question qui combine des contraintes
+> factuelles — acteurs, réalisateurs, genres — et une intention thématique,
+> tout en rendant les résultats vérifiables ?
 
-- Interface responsive en français : recherche, exemples, résultats et fiches de film.
-- Recherche relationnelle, thématique ou hybride avec contraintes obligatoires.
-- Comptage exact des films, personnes, acteurs et réalisateurs avec `COUNT DISTINCT`.
-- Désambiguïsation des personnes et des titres, avec confirmation explicite.
-- Preuves consultables : crédits, chemins de collaboration, extraits et keywords.
-- Pagination des listes relationnelles et couverture explicite des recherches thématiques.
-- Ingestion reproductible, traçabilité du dataset et évaluation comparative.
+## Sommaire
 
-## stack
+1. [Objectifs et fonctionnalités](#1-objectifs-et-fonctionnalités)
+2. [Architecture de la solution](#2-architecture-de-la-solution)
+3. [Données et modèle du graphe](#3-données-et-modèle-du-graphe)
+4. [Pipeline de traitement](#4-pipeline-de-traitement)
+5. [Organisation du dépôt](#5-organisation-du-dépôt)
+6. [Installation et démarrage](#6-installation-et-démarrage)
+7. [Configuration](#7-configuration)
+8. [Interface et API](#8-interface-et-api)
+9. [Évaluation et démonstration](#9-évaluation-et-démonstration)
+10. [Limites et perspectives](#10-limites-et-perspectives)
+11. [Versionnement et reproductibilité](#11-versionnement-et-reproductibilité)
+12. [Sources des données](#12-sources-des-données)
 
-| Composant | Technologie |
+## 1. Objectifs et fonctionnalités
+
+Le projet vise trois objectifs : **respecter les contraintes factuelles**, **retrouver
+des contenus proches du thème demandé** et **exposer les sources utilisées**.
+
+| Besoin | Réponse apportée |
 | --- | --- |
-| Interface | HTML, CSS et JavaScript natif, servis par FastAPI |
-| API | Python 3.12, FastAPI, Pydantic v2 |
-| Graphe et index vectoriel | Neo4j Community 5.26.0 |
-| Embeddings locaux | `intfloat/multilingual-e5-small`, 384 dimensions |
-| LLM | Groq, modèle configurable dans `.env` |
-| Exécution | Docker Compose : API et Neo4j |
-| Tests navigateur | Playwright et Chromium headless dans un conteneur optionnel |
+| Explorer les collaborations | Recherche de films, acteurs et réalisateurs à travers les relations du graphe. |
+| Compter les résultats | Comptages exacts des entités distinctes, indépendants du nombre de cartes affichées. |
+| Rechercher un thème en français | Comparaison multilingue entre la requête et les documents décrivant les films. |
+| Combiner relations et thème | Filtrage obligatoire par le graphe, puis classement sémantique des films admissibles. |
+| Éviter les confusions d'identité | Résolution des noms et demande de confirmation en cas d'ambiguïté. |
+| Comprendre une réponse | Consultation des crédits, chemins de collaboration, synopsis et mots-clés sources. |
+| Parcourir une liste | Pagination des résultats relationnels avec indication du total. |
 
-Une seule base conserve le graphe et les vecteurs. Le LLM produit un plan validé ;
-les requêtes Cypher proviennent de motifs autorisés et paramétrés.
+Exemple de question hybride : **« Quels films de Nolan avec DiCaprio parlent des rêves ? »**
+Le graphe détermine les films qui respectent les collaborations demandées ; E5 classe
+ces films selon le thème. Les sources relationnelles et documentaires accompagnent
+les résultats. Un score de similarité exprime une proximité estimée avec le thème.
 
-## comprendre le projet et préparer la soutenance
+## 2. Architecture de la solution
 
-Le [dossier d’architecture complet](docs/architecture_complete_soutenance.md) explique
-le rôle de chaque fichier, l’ingestion, le chunking, le retrieval, les preuves,
-la génération, le déploiement et les limites réellement observées.
-La [fiche de révision](docs/fiche_revision_soutenance.md) reprend le parcours d’une
-question, les distinctions essentielles et les questions possibles à l’oral.
+### Vue d'ensemble
 
-## démarrage avec docker
+L'architecture comprend une chaîne de préparation du corpus et une chaîne de réponse
+aux questions. **Neo4j conserve dans une même base les entités, les relations,
+les documents et les vecteurs.**
 
-Prérequis : Docker Desktop démarré, environ 4 Go de mémoire disponibles pour les
-services et le modèle, accès réseau initial pour télécharger les images et E5.
-La consommation et la latence réelles dépendent de la machine.
+```mermaid
+flowchart TB
+    subgraph PREP["Préparation du corpus"]
+        CSV["CSV TMDB : films et crédits"] --> VALID["Validation, jointure et normalisation"]
+        VALID --> GRAPH["Construction du graphe"]
+        VALID --> DOC["Document textuel par film"]
+        DOC --> E5["E5 multilingue local sur CPU"]
+    end
 
-1. Créer `.env` à partir de `.env.example` s'il n'existe pas, puis renseigner `GROQ_API_KEY`.
-   Conserver le fichier déjà configuré. Ne jamais ajouter une vraie clé à Git.
-2. Acquérir les deux CSV depuis [Kaggle](https://www.kaggle.com/datasets/tmdb/tmdb-movie-metadata).
-3. Les placer sous `data/raw/tmdb_5000_movies.csv` et `data/raw/tmdb_5000_credits.csv`.
-4. Exécuter depuis ce répertoire :
+    GRAPH --> DB[("Neo4j : graphe, documents et vecteurs")]
+    E5 -->|"Embeddings des documents"| DB
+
+    subgraph APP["Traitement des questions"]
+        UI["Interface web en français"] <--> API["API FastAPI"]
+        API <--> PIPE["Orchestration Python : validation, linking, retrieval et preuves"]
+        PIPE <--> LLM["API Groq : analyse et synthèse éventuelle"]
+    end
+
+    PIPE <--> DB
+    PIPE -->|"Encodage du thème demandé"| E5
+```
+
+### Responsabilités des composants
+
+| Couche | Technologie | Responsabilité |
+| --- | --- | --- |
+| Présentation | HTML, CSS et JavaScript natif | Saisie des questions, résultats, clarifications et consultation des sources. |
+| API | Python 3.12, FastAPI, Pydantic v2 | Contrats HTTP, validation des entrées et sérialisation des réponses. |
+| Orchestration | Pipeline Python contrôlé | Enchaînement des étapes, choix de la stratégie, couverture et gestion des erreurs. |
+| Connaissances | Neo4j Community `5.26.0` | Relations métier, contraintes d'intégrité, comptages et stockage des vecteurs. |
+| Représentation sémantique | `intfloat/multilingual-e5-small` | Encodage local des documents et requêtes en vecteurs de 384 dimensions. |
+| Langage naturel | Modèle configurable via Groq | Transformation de la question en plan structuré et rédaction facultative des recommandations. |
+| Exécution | Docker Compose | Démarrage de l'API, de Neo4j et montage des données persistantes. |
+
+### Choix structurants
+
+- **Graphe pour les faits :** les collaborations et les genres proviennent des champs
+  structurés du dataset. Les requêtes appliquent les contraintes avant le classement.
+- **Embeddings pour le sens :** E5 rapproche une question française des documents
+  du corpus, dont les synopsis sont principalement en anglais.
+- **LLM encadré :** Groq produit un plan déclaratif validé par Pydantic. Le code Python
+  résout les identifiants et compile des motifs Cypher autorisés et paramétrés.
+- **Stockage unifié :** les données relationnelles, les textes et les embeddings
+  partagent les identifiants et le manifeste d'un même corpus.
+- **Sources visibles :** les résultats structurés conservent leurs références,
+  même lorsque la rédaction par le LLM est indisponible.
+
+Le système suit un pipeline contrôlé. Il utilise des modèles préentraînés ; aucun
+entraînement sur TMDB n'est nécessaire au fonctionnement de cette version.
+
+## 3. Données et modèle du graphe
+
+### Corpus
+
+L'ingestion utilise deux fichiers, joints par identifiant de film :
+
+| Fichier | Informations exploitées |
+| --- | --- |
+| `tmdb_5000_movies.csv` | Identité, titre, synopsis, genres, mots-clés, date de sortie et métadonnées du film. |
+| `tmdb_5000_credits.csv` | Casting et crédits des réalisateurs. |
+
+Les volumes suivants correspondent au snapshot profilé et ingéré localement.
+Ils peuvent être recalculés avec les commandes `profile` et `ingest`.
+
+| Élément | Volume |
+| --- | ---: |
+| Films (`Movie`) | 4 803 |
+| Personnes, acteurs ou réalisateurs (`Person`) | 56 603 |
+| Genres (`Genre`) | 20 |
+| Relations acteur–film (`ACTED_IN`) | 106 084 |
+| Relations réalisateur–film (`DIRECTED`) | 5 166 |
+| Relations film–genre (`IN_GENRE`) | 12 160 |
+| Documents disposant d'un embedding | 4 801 |
+
+Quatre films n'ont pas de synopsis. Deux possèdent assez de mots-clés pour produire
+un document de métadonnées ; les deux autres restent accessibles par le graphe,
+sans embedding thématique.
+
+### Schéma métier
+
+```mermaid
+flowchart LR
+    P["Person : person_id, nom et nom normalisé"] -->|ACTED_IN| M["Movie : movie_id, titre, synopsis et embedding"]
+    P -->|DIRECTED| M
+    M -->|IN_GENRE| G["Genre : genre_id et nom"]
+    C["Corpus : snapshot, hashes et manifeste technique"]
+```
+
+Une même personne peut être acteur et réalisateur : ses rôles sont portés par les
+relations. Les personnages et les crédits d'origine sont conservés sur `ACTED_IN`.
+Les mots-clés restent des propriétés du film ; les genres sont des nœuds interrogeables.
+Le nœud technique `Corpus` conserve le manifeste de l'ingestion.
+
+Des contraintes d'unicité protègent les identifiants. Des index sur les noms,
+les titres et leurs formes normalisées accompagnent les index full-text.
+Le schéma exécuté est défini dans
+[`retrieval/neo4j_store.py`](src/moviegraphrag/retrieval/neo4j_store.py) ;
+[`cypher/schema.cypher`](cypher/schema.cypher) en fournit une référence partielle.
+
+**L'index vectoriel est créé, mais le parcours de recommandation actuel calcule
+la similarité exacte sur tous les documents encodés admissibles.** Il utilise
+`vector.similarity.cosine`, puis trie par score décroissant et identifiant croissant.
+
+## 4. Pipeline de traitement
+
+### 4.1. Préparation et ingestion
+
+1. **Valider les sources :** colonnes obligatoires, identifiants uniques, tableaux
+   JSON et correspondance des films entre les deux CSV.
+2. **Normaliser :** noms et titres, agrégation des crédits par couple personne–film,
+   extraction des genres et des réalisateurs.
+3. **Tracer le corpus :** calcul des hashes SHA-256 des CSV et d'un `snapshot_id`.
+4. **Charger le graphe :** création ou mise à jour par `MERGE`, avec écritures par lots.
+5. **Construire et encoder les documents :** texte enrichi et embeddings E5 locaux.
+6. **Contrôler le chargement :** volumes, couverture vectorielle et disponibilité
+   des index avant de passer le manifeste de `loading` à `ready`.
+
+L'ingestion du même snapshot est idempotente. Elle réutilise les embeddings dont
+le hash, la version du document, le modèle, la révision et la dimension correspondent.
+Un autre snapshot exige une base dédiée vide.
+
+### 4.2. Documents et embeddings
+
+Chaque film exploitable produit **un document principal**, sans overlap :
+
+```text
+Title: titre du film
+Overview: synopsis source
+Genres: genres du film
+Keywords: mots-clés sources
+```
+
+Les acteurs et réalisateurs sont interrogés par les relations du graphe. Le tokenizer
+contrôle la fenêtre E5 de **512 tokens**, préfixe et tokens spéciaux compris.
+Si nécessaire, les derniers mots-clés sont retirés du document jusqu'à respecter
+cette fenêtre ; leurs valeurs sources restent conservées sur le film.
+Un texte encore trop long provoque une erreur, sans troncature silencieuse du synopsis.
+
+Les documents sont encodés avec le préfixe `passage:`, les thèmes avec `query:`.
+Les vecteurs sont normalisés et possèdent **384 dimensions**. Le modèle et sa révision
+doivent correspondre à ceux du snapshot ingéré.
+
+### 4.3. De la question au résultat
+
+```mermaid
+flowchart TD
+    Q["Question en langage naturel"] --> PLAN["Groq : plan structuré"]
+    PLAN --> CHECK["Validation Pydantic et quantité demandée"]
+    CHECK --> LINK["Résolution des personnes, films et genres"]
+    LINK --> ID{"Identités résolues ?"}
+    ID -->|"Non, ambiguïté"| CLAR["Clarification auprès de l'utilisateur"]
+    CLAR --> LINK
+    ID -->|"Oui"| ROUTE{"Opération et contraintes"}
+    ROUTE --> COUNT["Comptage : COUNT DISTINCT"]
+    ROUTE --> LIST["Liste : contraintes du graphe et pagination"]
+    ROUTE --> REC["Recommandation : corpus ou candidats filtrés, puis cosine exact"]
+    COUNT --> PROOF["Preuves, couverture et provenance"]
+    LIST --> PROOF
+    REC --> PROOF
+    PROOF --> OUT["Rendu déterministe ou synthèse des recommandations"]
+    OUT --> RESPONSE["Réponse structurée et sources consultables"]
+```
+
+L'analyseur exprime l'opération (`list`, `count`, `recommend`), les entités mentionnées,
+les relations, les filtres et le thème éventuel. Les plans de graphe sont limités
+à des motifs connectés, acycliques et comportant au plus quatre relations.
+
+Le linking recherche les noms exacts, les alias et les patronymes, puis propose
+des correspondances approximatives si nécessaire. Un nom ambigu ou une correspondance
+approximative demande confirmation. Une entité absente est signalée explicitement.
+
+### 4.4. Stratégies de recherche
+
+| Opération | Stratégie | Traitement |
+| --- | --- | --- |
+| Compter des films ou des personnes | `GRAPH` | `COUNT DISTINCT` sur les entités respectant les contraintes, sans `LIMIT`. |
+| Lister des films ou des personnes | `GRAPH` | Calcul de tous les candidats admissibles, tri déterministe, puis pagination. |
+| Recommander selon un thème | `VECTOR` | Classement exact de tous les films encodés du corpus. |
+| Recommander avec relations et thème | `HYBRID_GRAPH_FIRST` | Sélection de tous les films respectant les contraintes, puis classement exact des candidats encodés. |
+
+La quantité explicitement demandée dans la question est prioritaire sur la limite
+de l'interface, avec un plafond de **20 résultats par réponse**. Le comptage porte
+sur l'ensemble admissible et reste indépendant de ce plafond. Les recommandations
+thématiques présentent un top-k ; elles n'ont pas de pagination exhaustive.
+
+### 4.5. Augmentation, preuves et génération
+
+| Type de preuve | Contenu exposé |
+| --- | --- |
+| `relation` | Nœuds et relations d'un chemin témoin pour le résultat. |
+| `document` | Synopsis, mots-clés avec identifiants, genres, couverture et hash du document. |
+| `aggregate` | Valeur du compte distinct, cible, paramètres du motif et provenance du corpus. |
+
+L'intégrité documentaire est contrôlée par identité, snapshot, modèle, révision
+et hash. Le contexte JSON regroupe les résultats, les preuves et leur couverture
+dans un budget configurable de **24 000 caractères par défaut**.
+
+Les listes et les comptes utilisent un rendu déterministe. Les recommandations
+peuvent recevoir une synthèse Groq lorsque `SYNTHESIS_ENABLED=true` et que le contexte
+est complet. Les références citées doivent appartenir aux preuves transmises.
+Une synthèse indisponible ou invalide déclenche le rendu déterministe avec ses sources.
+
+La réponse conserve un `trace_id`, le plan, la stratégie, les versions, les hashes,
+la latence et l'usage LLM. **La validité d'une référence garantit son existence ;
+la fidélité du texte généré et la pertinence thématique demandent une évaluation humaine.**
+
+## 5. Organisation du dépôt
+
+```text
+MovieGraphRAG/
+├── src/moviegraphrag/
+│   ├── api/                 # Routes HTTP et cycle de vie de l'application
+│   ├── web/                 # Interface HTML, CSS et JavaScript
+│   ├── ingestion/           # Lecture, validation, documents et chargement
+│   ├── linking/             # Résolution d'identités et clarifications signées
+│   ├── retrieval/           # Compilation Cypher, accès Neo4j et classement
+│   ├── evidence/            # Contrôle des sources et construction du contexte
+│   ├── llm/                 # Adaptateur Groq et prompts
+│   ├── schemas/             # Modèles et contrats Pydantic
+│   ├── orchestration.py     # Enchaînement du pipeline RAG
+│   ├── embeddings.py        # Chargement et encodage E5 sur CPU
+│   ├── evaluation.py        # Références, baselines et métriques
+│   ├── quantities.py        # Contrôle des quantités demandées
+│   ├── config.py            # Paramètres d'environnement
+│   └── cli.py               # Commandes de préparation et d'évaluation
+├── cypher/                  # Référence du schéma et exemples de requêtes
+├── evaluation/
+│   ├── build_cases.py       # Construction du jeu d'évaluation
+│   ├── cases.jsonl          # Questions, références et annotations
+│   └── reports/             # Rapports générés, exclus de Git
+├── data/
+│   ├── raw/                 # CSV à fournir localement, exclus de Git
+│   └── reports/             # Profilage et manifeste locaux, exclus de Git
+├── .env.example             # Modèle de configuration sans clé API
+├── .gitignore               # Règles d'exclusion du dépôt
+├── compose.yaml             # Services et volumes Docker
+├── Dockerfile               # Construction de l'image Python
+├── pyproject.toml           # Dépendances, package et commande CLI
+└── README.md                # Présentation et architecture de la solution
+```
+
+## 6. Installation et démarrage
+
+### Prérequis
+
+- Docker Desktop démarré avec les conteneurs Linux et Docker Compose disponible.
+- Environ 4 Go de mémoire disponibles pour les services et le modèle ; les besoins
+  réels dépendent de la machine et de la charge.
+- Accès réseau initial pour les images et le modèle E5, puis accès à Groq pour les questions.
+- Les deux CSV TMDB 5000 et une clé `GROQ_API_KEY` pour l'analyse des questions.
+
+L'exécution Docker ne nécessite pas de Python système ni de serveur frontend séparé.
+
+### Préparer la configuration et les données
+
+Depuis la racine du projet, créer `.env` s'il n'existe pas :
+
+```powershell
+if (-not (Test-Path .env)) { Copy-Item .env.example .env }
+```
+
+Renseigner `GROQ_API_KEY` dans `.env`, puis placer les fichiers à ces emplacements :
+
+```text
+data/raw/tmdb_5000_movies.csv
+data/raw/tmdb_5000_credits.csv
+```
+
+### Construire, profiler et ingérer
 
 ```powershell
 docker compose up -d --build
@@ -57,105 +330,90 @@ docker compose exec api moviegraphrag profile --output data/reports/profile.json
 docker compose exec api moviegraphrag ingest --output data/reports/manifest.json
 ```
 
-L'ingestion télécharge le modèle gratuit et crée les embeddings sur CPU. Elle
-peut prendre plusieurs minutes. Les CSV et caches ne sont jamais ajoutés à Git.
-La clé Groq n'est pas nécessaire pour profiler ou ingérer.
+Le premier chargement télécharge E5 et calcule les embeddings sur CPU ; il peut
+prendre plusieurs minutes. Le profilage et l'ingestion fonctionnent sans clé Groq.
+Après ingestion, attendre l'indicateur **Prêt à explorer** dans l'interface.
 
-Application : <http://localhost:8000>. Swagger : <http://localhost:8000/docs>.
-Interface Neo4j : <http://localhost:7474>.
-Ports liés à localhost. Le mot de passe d'exemple est destiné au développement local.
+| Accès | Adresse |
+| --- | --- |
+| Application | <http://localhost:8000> |
+| Documentation interactive de l'API | <http://localhost:8000/docs> |
+| Interface Neo4j | <http://localhost:7474> |
 
-Si le corpus est déjà ingéré, il suffit de relancer les services :
+### Exploitation locale
 
 ```powershell
+# Relancer un corpus déjà ingéré.
 docker compose up -d
+# Examiner les services et les dernières erreurs.
+docker compose ps
+docker compose logs --tail 100 api
+# Recharger l'API après une modification du code Python.
+docker compose restart api
+# Arrêter les services en conservant le volume Neo4j.
+docker compose down
 ```
 
-Attendre **Prêt à explorer** dans l'interface avant d'envoyer une question.
+Le volume nommé `neo4j_data` conserve le graphe et les vecteurs. Les répertoires
+`data/` et `models/` sont montés depuis la machine. Le code source est monté en
+lecture seule dans l'API ; l'interface est servie par le même service.
 
-### état local conservé
+## 7. Configuration
 
-Les conteneurs API et Neo4j sont conservés avec la politique `unless-stopped` :
-ils redémarrent avec Docker Desktop sauf arrêt manuel. Le volume nommé Neo4j
-conserve le graphe et les vecteurs ; `data/` et `models/` restent sur la machine.
-Une image locale `moviegraphrag:saved-20261108` conserve le code de l'application
-et du frontend avec les dépendances déjà installées. Elle ne contient pas `.env`,
-la clé Groq, les CSV, le volume Neo4j ou le cache du modèle.
-
-Pour relancer cet état sans installation ni reconstruction :
-
-```powershell
-docker compose up -d --no-build --pull never
-```
-
-Conserver ce répertoire, le fichier `.env`, les caches et le volume Docker.
-Les tests navigateur sont optionnels : leur installation a été interrompue à la
-demande de l'utilisateur et leurs parcours ne sont pas validés.
-
-## configuration
+Les paramètres sont décrits dans [`.env.example`](.env.example) et chargés par
+[`config.py`](src/moviegraphrag/config.py).
 
 | Variable | Rôle |
 | --- | --- |
-| `GROQ_API_KEY` | Clé du compte Groq, utilisée uniquement par le backend. |
-| `GROQ_MODEL` | Identifiant du modèle, compatible avec les sorties structurées strictes. |
-| `NEO4J_USER`, `NEO4J_PASSWORD`, `NEO4J_DATABASE` | Connexion au graphe. |
-| `EMBEDDING_MODEL`, `EMBEDDING_REVISION` | Modèle local et révision du snapshot vectoriel. |
-| `SYNTHESIS_ENABLED` | Active la synthèse LLM française après sélection des preuves. |
-| `CONTEXT_CHAR_BUDGET` | Budget du contexte JSON, en caractères. |
-| `LLM_INPUT_USD_PER_MILLION`, `LLM_OUTPUT_USD_PER_MILLION` | Tarifs facultatifs pour estimer le coût des traces. |
+| `GROQ_API_KEY` | Clé fournisseur utilisée par le backend. |
+| `GROQ_MODEL` | Modèle d'analyse et de synthèse, à choisir compatible avec les sorties structurées attendues. |
+| `NEO4J_URI`, `NEO4J_USER`, `NEO4J_PASSWORD`, `NEO4J_DATABASE` | Paramètres de connexion au graphe. |
+| `EMBEDDING_MODEL`, `EMBEDDING_REVISION` | Modèle local et révision des embeddings. |
+| `HF_HOME` | Emplacement du cache des modèles. |
+| `SYNTHESIS_ENABLED` | Activation de la synthèse LLM des recommandations. |
+| `QUERY_TIMEOUT` | Délai maximal d'exécution d'une requête Neo4j, en secondes. |
+| `CONTEXT_CHAR_BUDGET` | Taille maximale du contexte de synthèse sérialisé. |
+| `LLM_INPUT_USD_PER_MILLION`, `LLM_OUTPUT_USD_PER_MILLION` | Tarifs facultatifs pour estimer le coût des appels dans les traces. |
 
-Les valeurs initiales figurent dans [.env.example](.env.example). Compose configure
-automatiquement l'URI interne `bolt://neo4j:7687` et le cache des modèles.
-Un changement de modèle d'embeddings demande un index compatible ; il ne suffit pas
-de modifier son nom pour réutiliser les vecteurs existants.
+Compose configure l'URI interne `bolt://neo4j:7687` et le cache `/models`.
+Après modification de `.env`, recréer l'API pour charger les nouvelles valeurs :
 
-## interface de recherche
+```powershell
+docker compose up -d --force-recreate api
+```
 
-La page en français est servie par FastAPI dans le même conteneur que l'API.
-HTML, CSS et JavaScript natif : aucun serveur frontend supplémentaire à lancer.
-Les ressources statiques sont aussi incluses dans le package Python installé.
+Changer le nom du modèle d'embeddings ne rend pas les vecteurs existants compatibles.
+La configuration doit correspondre au snapshot ; une migration demande une ingestion adaptée.
 
-- Poser une question ou sélectionner un des trois exemples, puis cliquer sur **Explorer**.
-- Choisir 5, 10 ou 20 résultats. Une quantité explicitement demandée dans la question est prioritaire, avec un plafond de 20. L'indicateur **Prêt à explorer** confirme la disponibilité.
-- Ouvrir **Pourquoi ce résultat ?** pour vérifier les collaborations, les extraits
-  du synopsis et les keywords sources. Le classement ne certifie ni la pertinence thématique ni la centralité.
-- Ouvrir **Détails du film** pour charger les données sources à la demande.
-- Confirmer les identités proposées lorsqu'un nom est ambigu. Les choix déjà
-  confirmés sont conservés lors des clarifications suivantes.
-- Utiliser **Précédent** et **Suivant** pour les listes relationnelles. Les pages
-  déjà consultées sont conservées en mémoire et ne déclenchent pas de nouvel appel Groq.
+## 8. Interface et API
 
-Modifier la question ou la limite réinitialise les résultats et les clarifications.
-Les erreurs et la couverture partielle sont affichées explicitement. Un jeton expiré
-demande de relancer la question. Aucun historique n'est conservé après rechargement ;
-la clé Groq reste côté serveur. Les résultats API exposent `type: Movie | Person`.
+### Parcours utilisateur
 
-Quelques scénarios à essayer directement dans l'interface :
+1. Saisir une question ou choisir un exemple, puis lancer **Explorer**.
+2. Confirmer une identité si plusieurs candidats sont proposés.
+3. Consulter le compte ou les résultats et leur indication de couverture.
+4. Ouvrir **Pourquoi ce résultat ?** pour examiner les preuves.
+5. Afficher les détails d'un film ou parcourir les pages d'une liste relationnelle.
 
-| Question | Vérification attendue |
-| --- | --- |
-| Quels films ont été réalisés par Christopher Nolan avec Cillian Murphy ? | Quatre films ; ouvrir les preuves et les détails d'Inception. |
-| Quels réalisateurs ont travaillé avec Leonardo DiCaprio ? | Dix-sept personnes ; parcourir les pages avec une limite de cinq. |
-| Quels films ont Tom Holland au casting ? | Confirmer l'identité proposée si le nom reste ambigu. |
-| Quels films de Nolan avec DiCaprio parlent des rêves ? | Inception, avec preuves relationnelles et thématiques. |
-| Quels films sont réalisés par UnePersonneInexistanteXYZ ? | Entité absente, sans remplacement par des recommandations. |
+Les pages déjà consultées sont conservées en mémoire. Les pages relationnelles
+suivantes réutilisent un plan signé, sans nouvelle analyse de la question par Groq.
+Les jetons de clarification sont liés à la question, expirent après 30 minutes
+et sont invalidés au redémarrage de l'API. L'historique de l'interface reste en mémoire
+jusqu'au rechargement de la page.
 
-Les recherches appellent réellement Groq et dépendent de sa disponibilité et des
-limites du compte. Une erreur fournisseur reste affichée, sans réponse inventée.
+### Principaux endpoints
 
-## api
+| Méthode | Route | Fonction |
+| --- | --- | --- |
+| `GET` | `/` | Interface web. |
+| `POST` | `/questions` | Analyse et réponse avec résultats, preuves, couverture et trace. |
+| `GET` | `/entities/search?q=...&type=Person` | Recherche d'entités de type `Person`, `Movie` ou `Genre`. |
+| `GET` | `/movies/{movie_id}` | Détails sources d'un film, sans son vecteur. |
+| `GET` | `/health` | Vérification du processus API. |
+| `GET` | `/ready` | Vérification du corpus, des index, de la configuration LLM et du modèle local chargé. |
+| `GET` | `/docs` | Documentation interactive Swagger. |
 
-| Méthode et endpoint | Fonction |
-| --- | --- |
-| `GET /` | Interface web. |
-| `POST /questions` | Réponse, résultats, preuves, couverture et référence de trace. |
-| `GET /entities/search?q=...&type=Person` | Candidats d'identification ; types `Person`, `Movie`, `Genre`. |
-| `GET /movies/{movie_id}` | Données sources d'un film, sans son vecteur. |
-| `GET /health` | Processus vivant. |
-| `GET /ready` | Corpus, index, configuration LLM et modèle local disponibles. |
-| `GET /docs` | Documentation interactive Swagger. |
-
-Exemple d'appel manuel depuis PowerShell :
+Exemple PowerShell :
 
 ```powershell
 Invoke-RestMethod -Method Post -Uri http://localhost:8000/questions `
@@ -163,213 +421,114 @@ Invoke-RestMethod -Method Post -Uri http://localhost:8000/questions `
   -Body '{"question":"Quels films de Nolan avec DiCaprio parlent des rêves ?","limit":5}'
 ```
 
-`/health` vérifie le processus. `/ready` exige un corpus chargé, les index disponibles,
-une clé LLM configurée et le modèle chargé dans le processus API. Un worker de démarrage
-charge le modèle après la disponibilité du corpus ; `/ready` ne déclenche aucun téléchargement.
-Une clé configurée ne prouve pas que le compte dispose de crédits.
-L’analyse autorise une correction de schéma. Si Groq refuse son propre JSON,
-cette correction utilise le mode JSON objet avec validation Pydantic côté application.
-Les reprises réseau respectent les délais du fournisseur et restent bornées.
+La réponse expose notamment `status`, `operation`, `strategy`, `results`, `count`,
+`evidence`, `coverage`, `warnings` et `trace_id`. Un comptage retourne `count`,
+une preuve `aggregate` et une liste `results` vide.
 
-Pour une clarification, renvoyer exactement la même question avec le
-`clarification_token` reçu et `selections: {"reference_de_mention": 123}`.
-Les IDs doivent provenir des candidats proposés. Les jetons expirent après 30 minutes
-et sont invalidés au redémarrage de l'API. Les questions graphe acceptent `offset` ;
-les recommandations sémantiques n'ont pas de pagination exhaustive.
-Les listes retournent aussi un plan signé dans clarification_token ; le frontend le
-réutilise pour les pages suivantes, sans nouvelle interprétation par Groq.
+Le champ `status` distingue la réussite, la clarification, l'entité absente,
+l'absence de correspondance, les preuves insuffisantes, les demandes non prises
+en charge et les erreurs de dépendance. **Un HTTP 200 ne suffit donc pas à conclure
+qu'une réponse métier est disponible.** `/ready` vérifie la présence d'une clé Groq,
+sans garantir la disponibilité du fournisseur ni les quotas du compte.
 
-La réponse distingue `operation: list | count | recommend`. Un comptage retourne
-`count`, une preuve `aggregate` et une liste `results` vide ; zéro est un compte
-valide pour une identité connue sans crédit correspondant. `limit` ne borne jamais
-le comptage. Les recommandations retournent `thematic_verification: not_performed`.
-La couverture expose `scored`, `sources_checked`, `without_embedding`,
-`ranking_coverage` et `effective_limit` ; elle ne prétend pas vérifier les thèmes.
+## 9. Évaluation et démonstration
 
-Une réponse HTTP 200 peut signaler `needs_clarification`, `entity_not_found`,
-`no_match_in_dataset`, `insufficient_evidence`, `unsupported` ou `dependency_error`.
-Les clients doivent donc examiner le champ `status`, pas seulement le code HTTP.
+### Protocole d'évaluation
 
-## architecture
+Le jeu versionné comporte **80 questions réparties en quatre catégories**.
+Les références relationnelles sont calculées depuis les CSV bruts, indépendamment
+des requêtes Cypher. Les annotations thématiques et de centralité nécessitent
+une relecture humaine avant d'interpréter les métriques.
 
-```mermaid
-flowchart LR
-    CSV[CSV TMDB] --> ING[Validation et ingestion]
-    ING --> NEO[(Neo4j)]
-    ING --> E5[Documents et embeddings E5]
-    E5 --> NEO
-    UI[Interface web] --> API[FastAPI]
-    API --> PLAN[Analyse Groq et linking]
-    PLAN --> ROUTE[Router contrôlé]
-    ROUTE --> NEO
-    NEO --> PROOF[Preuves et contexte]
-    PROOF --> API
-    API --> UI
-```
-
-Le modèle du graphe est `Person → ACTED_IN / DIRECTED → Movie → IN_GENRE → Genre`.
-Les keywords sont conservés sur les films. En hybride, le graphe sélectionne tous
-les films admissibles avant le calcul de similarité exacte. Les détails figurent
-dans [la documentation d'architecture](docs/architecture.md).
-
-Le parcours thématique pur calcule lui aussi la similarité exacte sur tous les
-documents encodés : 4 801 dans ce snapshot. L’index vectoriel reste présent pour
-compatibilité et expérimentation ; il n’est plus utilisé par ce parcours.
-Aucun appel d’appréciation thématique ni reranker ne se trouve entre E5 et le contexte.
-
-```text
-moviegraphrag/
-├── src/moviegraphrag/
-│   ├── api/          # endpoints et ressources statiques
-│   ├── web/          # interface HTML, CSS et JavaScript
-│   ├── ingestion/    # profilage et chargement des CSV
-│   ├── linking/      # identités et clarifications signées
-│   ├── retrieval/    # Cypher, index et classement
-│   ├── evidence/     # validation des preuves et contexte
-│   ├── llm/          # adaptateur Groq et prompts
-│   └── schemas/      # contrats validés
-├── tests/real/       # tests backend avec dépendances réelles
-├── tests/browser/    # parcours Chromium réels
-├── evaluation/       # cas, baselines et rapports
-├── data/raw/         # CSV locaux, exclus de Git
-├── data/reports/     # profilage et rapports locaux
-├── docs/
-├── compose.yaml
-└── .env.example
-```
-
-## environnement docker
-
-L'application et tous ses tests s'exécutent dans Docker. Aucun Python système n'est
-nécessaire. Le code source est monté en lecture seule pour le développement local ;
-redémarrer le service API après une modification de code. La famille Neo4j retenue est
-5.26 LTS ; Compose utilise explicitement `5.26.0-community`, à mettre à jour vers un
-correctif validé avant tout déploiement exposé. L'application ne fournit pas de
-frontière d'autorisation multiutilisateur et ne doit pas être publiée telle quelle.
-
-```powershell
-# État des services et erreurs récentes.
-docker compose ps
-docker compose logs --tail 100 api
-# Après une modification Python.
-docker compose restart api
-# Arrêter les services en conservant le volume Neo4j et les fichiers locaux.
-docker compose down
-```
-
-## dépannage
-
-| Symptôme | Action |
+| Système évalué | Description |
 | --- | --- |
-| Docker ne répond pas | Démarrer Docker Desktop avec les conteneurs Linux. |
-| Préparation en cours | Attendre le chargement E5 ; vérifier l'ingestion et les logs API. |
-| CSV manquants | Vérifier les deux noms et leur emplacement sous `data/raw/`. |
-| Clé Groq modifiée | Recréer l'API avec `docker compose up -d --force-recreate api`. |
-| Groq 429 | Limite du compte atteinte ; respecter le délai fournisseur. Les reprises sont bornées. |
-| Groq 400 | Consulter le code et le message fournisseur dans les logs API. |
-| Clarification expirée | Relancer explicitement la question ; les tokens expirent après 30 minutes ou au redémarrage API. |
-| Modèle/index incompatibles | Rétablir le modèle du snapshot ou préparer une ingestion dans une base dédiée. |
-| Premier build navigateur lent | Laisser terminer le téléchargement de Chromium ; il sert uniquement aux tests. |
+| `graph` | Pipeline complet MovieGraphRAG, avec sa stratégie adaptée à chaque question. |
+| `vector` | Recherche sémantique seule sur les documents enrichis des films. |
+| `flat` | Recherche sémantique sur des textes enrichis avec les crédits, découpés si nécessaire. |
 
-## comportement et limites
-
-- Graph : tous les candidats sont déterminés avant pagination.
-- Hybride : toutes les contraintes sont appliquées avant le scoring cosine exact.
-- Vectoriel pur : similarité exacte sur tous les documents encodés, sans plafond de cent.
-- Aucun appel d'appréciation thématique ni reranker ; la pertinence reste estimée.
-- Les demandes de centralité certifiée et les comptes thématiques exigent une reformulation.
-- Les documents et les références sont contrôlés ; l'implication sémantique
-  et la fidélité de la synthèse nécessitent toujours une évaluation humaine.
-- Les homonymes non résolus et les fautes fuzzy demandent une clarification.
-- Les traductions de titres absentes, négations, agrégations autres que les comptes prévus et similarités à un film
-  de référence sont hors MVP ; l'analyseur doit les déclarer non prises en charge.
-- Une interprétation LLM valide syntaxiquement peut rester erronée. Voir les tests et l'évaluation.
-- Pas de reconstruction destructive automatique. Un autre snapshot demande une base dédiée vide.
-- Une ingestion échouée laisse le corpus `loading` ; la relancer avec les mêmes fichiers.
-- Le coût reste `null` tant que les tarifs ne sont pas renseignés dans `.env`.
-
-Modèles, hashes, prompts, latence et consommation sont enregistrés dans les traces.
-Pour une reproduction stricte, fixer `EMBEDDING_REVISION` à un commit et
-`GROQ_MODEL` à un identifiant disponible chez le fournisseur. Le modèle
-effectivement répondu est consigné ; `latest` n'est pas une garantie de stabilité.
-
-## vérification
-
-Pour tester toi-même les différentes étapes du RAG, consulter le
-[cahier de 29 tests manuels](docs/tests_manuels_rag.md) et sa
-[grille de résultats à remplir](docs/resultats_tests_manuels.csv).
-Il couvre retrieval, augmentation, génération et raisonnement sur le graphe,
-avec questions, résultats attendus, métriques et limites d’observabilité.
-Aucune installation n’est nécessaire et aucun de ces scénarios n’est lancé automatiquement.
-
-Les tests refusent de démarrer hors Docker. Aucune doublure de Neo4j, E5, HTTP ou
-Groq n'est utilisée. Les CSV manquants, un corpus non chargé ou une clé absente
-sont des erreurs, sans remplacement par des données simulées.
-
-```powershell
-# Après l'ingestion : stockage, embeddings réels et HTTP réel, sans appels LLM.
-docker compose --profile test run --rm tests python -m pytest -q tests/real -m 'not llm'
-# Validation complète, avec appels réels à Groq.
-docker compose --profile test run --rm tests
-# Analyse statique, également dans Docker.
-docker compose --profile test run --rm tests python -m ruff check src tests evaluation
-docker compose exec api moviegraphrag reference --output data/reports/reference.json
-```
-
-Les parcours navigateur utilisent Chromium dans un conteneur de test optionnel.
-Ils interrogent la vraie API, Neo4j et Groq, sans interception ni remplacement des réponses.
-Ils nécessitent le corpus ingéré et le service API prêt, comme la suite backend :
-
-```powershell
-docker compose --profile test run --rm --build browser-tests
-```
-
-Les captures ordinateur/mobile, le rapport JUnit et les traces d'échec sont écrits
-sous `.runtime/browser/` (exclus de Git). Le conteneur navigateur ne reçoit aucune
-clé API. La première construction télécharge Chromium et ses dépendances ; les
-tests suivants réutilisent l'image locale. Les parcours couvrent recherche, preuves,
-fiche film, clarification, pagination, entité absente et navigation au clavier.
-
-Le test d'idempotence réingère réellement le snapshot. Les vecteurs dont le hash,
-le modèle et la révision correspondent sont réutilisés. Les tests LLM nécessitent
-`GROQ_API_KEY` dans `.env` ; après modification de cette clé, recréer le service :
-`docker compose up -d --force-recreate api`. Le fichier `/app/requirements.lock`
-dans l'image consigne les versions effectivement installées.
-
-## évaluation
+Après ingestion :
 
 ```powershell
 docker compose exec api python evaluation/build_cases.py
+docker compose exec api moviegraphrag reference --output data/reports/reference.json
 docker compose exec api moviegraphrag evaluate --system graph --split dev --output evaluation/reports/graph.json
 docker compose exec api moviegraphrag evaluate --system vector --split dev --output evaluation/reports/vector.json
 docker compose exec api moviegraphrag evaluate --system flat --split dev --output evaluation/reports/flat.json
 ```
 
-Le jeu comprend 80 questions, réparties en quatre catégories. Les références
-des 20 questions relationnelles sont calculées depuis les CSV bruts indépendamment
-des requêtes Cypher ; les noms réellement ambigus restent explicitement non résolus.
-La régénération préserve les annotations humaines et vérifie les familles, les splits et le snapshot.
-Les annotations thématiques et de centralité restent à relire : les champs vides
-ne sont jamais convertis en zéros de performance et aucun gain n'est inventé.
+Les rapports exposent la précision et le nDCG à 5 lorsque les jugements sont vérifiés,
+ainsi que le rappel à 5 lorsque les références sont exhaustives. La justesse de
+l'ensemble relationnel complet est évaluée séparément de sa première page.
+Les latences médiane et au 95e percentile, les traces et la couverture sont enregistrées.
 
-Le runner fournit les métriques de retrieval lorsque les jugements sont vérifiés,
-les latences et traces. L'égalité de l'ensemble complet du graphe est évaluée séparément
-du top 5 et de sa première page. La latence de ce retrieval supplémentaire est séparée
-de la latence du pipeline complet ; elle n'est pas confondue avec celle des baselines.
-Pour les réponses de type Person, les baselines vectorielles
-retournent des documents Movie : la comparaison doit porter sur les preuves retrouvées
-ou une réponse évaluée humainement, pas comparer des IDs de personnes à des IDs de films.
-Le baseline `flat` découpe les longues listes de crédits pour ne pas les perdre dans
-la fenêtre du modèle ; cette différence doit figurer dans le rapport.
-Les évaluations de fidélité, plans, linking et génération sont à annoter séparément.
+La latence du pipeline complet et celle d'un retrieval seul couvrent des opérations
+différentes. De même, une liste de personnes ne se compare pas directement aux
+identifiants de films retournés par les baselines. Les annotations absentes restent
+non évaluées ; aucun gain de performance n'est présumé.
 
-## données et attribution
+### Déroulé proposé devant un jury
 
-Source : [TMDB 5000 sur Kaggle](https://www.kaggle.com/datasets/tmdb/tmdb-movie-metadata),
-données issues de [TMDB](https://www.themoviedb.org).
-Les conditions de redistribution des CSV ne sont pas établies ici : aucun CSV n'est
-redistribué. Consulter les conditions applicables avant de publier des données ou
-leurs dérivés. [Attribution TMDB](https://developer.themoviedb.org/docs/faq).
+| Étape | Question ou action | Point à mettre en évidence |
+| --- | --- | --- |
+| Recherche relationnelle | « Quels films ont été réalisés par Christopher Nolan avec Cillian Murphy ? » | Contraintes et chemins de collaboration vérifiables. |
+| Comptage | « Combien de films ont été réalisés par Christopher Nolan ? » | Compte distinct sur le corpus, indépendant de la pagination. |
+| Recherche hybride | « Quels films de Nolan avec DiCaprio parlent des rêves ? » | Contraintes du graphe puis classement par le thème. |
+| Clarification | « Quels films ont Tom Holland au casting ? » | Choix explicite lorsque plusieurs identités restent possibles. |
+| Consultation des sources | Ouvrir les preuves et la fiche d'un film. | Provenance des relations et du contenu documentaire. |
+| Gestion des absences | Rechercher un nom inexistant dans le corpus. | Signalement explicite de l'absence de l'entité. |
 
-« This product uses the TMDB API but is not endorsed or certified by TMDB. »
-Cette mention d'attribution ne constitue pas une licence de redistribution.
+Les suites backend et navigateur, leurs outils et les cahiers manuels sont conservés
+localement et exclus du dépôt. Le profil Compose `test` s'appuie sur ces fichiers
+locaux ; il nécessite de les posséder pour être exécuté. Les commandes d'évaluation
+ci-dessus utilisent les ressources versionnées.
+
+## 10. Limites et perspectives
+
+| Limite actuelle | Conséquence |
+| --- | --- |
+| Corpus statique TMDB 5000 | Les réponses décrivent ce snapshot ; une absence ne prouve pas une absence dans l'ensemble du cinéma. |
+| Similarité sémantique estimée | Le classement ne certifie ni la pertinence thématique ni la centralité du thème. Aucun reranker ni évaluateur thématique intermédiaire n'est utilisé. |
+| Couverture documentaire partielle | Deux films sans embedding restent accessibles aux recherches relationnelles. |
+| Interprétation par un LLM | Un plan syntaxiquement valide peut encore traduire incorrectement la question. |
+| Périmètre fonctionnel borné | Comptes thématiques, centralité certifiée, négations, similarité à un film de référence et agrégations non prévues demandent une reformulation. |
+| Disponibilité de Groq | L'analyse des nouvelles questions dépend du fournisseur, du réseau et des quotas. |
+| Démonstration locale | Les ports sont liés à localhost ; la version ne fournit pas d'autorisation multiutilisateur. |
+
+Les évolutions envisagées sont la consolidation des annotations et du benchmark,
+l'ajout d'un reranker multilingue si son gain est mesuré, l'élargissement des questions
+prises en charge et une stratégie de recherche adaptée à des corpus plus volumineux.
+Une exposition multiutilisateur demanderait notamment authentification et contrôle d'accès.
+
+## 11. Versionnement et reproductibilité
+
+Le dépôt conserve le **code de la solution**, les **fichiers de déploiement**,
+le **jeu d'évaluation** et ce **README de présentation**.
+Les exclusions sont définies dans [`.gitignore`](.gitignore) :
+
+- configuration locale et secrets (`.env` et ses variantes, avec `.env.example` conservé) ;
+- tests, outils navigateur et dossiers de documentation de travail sous `docs/`
+  — architecture détaillée, fiches de révision et cahiers manuels ;
+- CSV sources, rapports générés et traces d'exécution ;
+- poids des modèles, environnements Python, caches et fichiers temporaires.
+
+Les fichiers `.gitkeep` conservent les répertoires d'accueil des données et des rapports.
+Les fichiers exclus déjà suivis doivent être retirés de l'index avec `git rm --cached`
+pour que les règles s'appliquent ; leurs copies locales sont conservées.
+Cette opération concerne les prochains commits et laisse l'historique existant intact.
+
+Pour reproduire une exécution, conserver les CSV d'origine et leurs hashes,
+le manifeste d'ingestion, la révision exacte du modèle E5, le modèle Groq demandé
+et celui effectivement utilisé dans les traces. Fixer `EMBEDDING_REVISION` à un commit
+permet de stabiliser le snapshot du modèle. L'image Docker consigne ses dépendances
+installées dans `/app/requirements.lock`.
+
+## 12. Sources des données
+
+Le corpus provient de [TMDB 5000 Movie Dataset sur Kaggle](https://www.kaggle.com/datasets/tmdb/tmdb-movie-metadata),
+à partir de données [TMDB](https://www.themoviedb.org).
+Les CSV sont à acquérir séparément et sont exclus de ce dépôt.
+Consulter les conditions des sources avant toute redistribution des données ou de leurs dérivés.
+
+Mention d'attribution TMDB :
+
+> This product uses the TMDB API but is not endorsed or certified by TMDB.

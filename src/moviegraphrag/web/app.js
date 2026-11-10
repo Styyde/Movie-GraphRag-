@@ -14,6 +14,13 @@ const statusMessages = {
   unsupported: "Cette question ne peut pas encore être traitée. Essayez une collaboration, un genre ou un thème.",
   dependency_error: "Le service de recherche est momentanément indisponible. Vous pouvez réessayer dans un instant.",
 };
+const statusTitles = {
+  entity_not_found: "Entité introuvable",
+  no_match_in_dataset: "Aucun résultat à afficher",
+  insufficient_evidence: "Sources insuffisantes",
+  unsupported: "Question non interprétée",
+  dependency_error: "Service indisponible",
+};
 
 function element(tag, className, text) {
   const node = document.createElement(tag);
@@ -22,9 +29,10 @@ function element(tag, className, text) {
   return node;
 }
 
-function status(text = "", error = false) {
+function status(text = "", error = false, quiet = false) {
   $("#status-message").textContent = text;
   $("#status-message").dataset.error = String(error);
+  $("#status-message").classList.toggle("is-quiet", quiet);
 }
 
 function controls() {
@@ -35,10 +43,11 @@ function controls() {
   $("#search-spinner").hidden = !state.busy;
   $(".button-arrow").hidden = state.busy;
   $("#results-section").setAttribute("aria-busy", String(state.busy));
-  document.querySelectorAll(".example-button, #clarification-form input, #clarification-form button, #restart-search").forEach((node) => { node.disabled = state.busy; });
+  document.querySelectorAll(".example-button, #clarification-form input, #clarification-form button, #restart-search, #new-search").forEach((node) => { node.disabled = state.busy; });
   const coverage = state.response?.coverage;
-  $("#previous-page").disabled = state.busy || !coverage || coverage.offset === 0;
-  $("#next-page").disabled = state.busy || !coverage?.has_more;
+  const canPage = state.response?.status === "ok" && state.response.operation === "list";
+  $("#previous-page").disabled = state.busy || !canPage || !coverage || coverage.offset === 0;
+  $("#next-page").disabled = state.busy || !canPage || !coverage?.has_more;
 }
 
 function resetSearch() {
@@ -54,8 +63,17 @@ function resetSearch() {
   $("#clarification-fields").replaceChildren();
   $("#restart-search").hidden = true;
   $("#welcome").hidden = false;
+  document.body.classList.remove("has-results");
+  $("#search-details").open = false;
+  resizeQuestion();
   status();
   controls();
+}
+
+function resizeQuestion() {
+  const question = $("#question");
+  question.style.height = "auto";
+  question.style.height = `${Math.min(question.scrollHeight, 220)}px`;
 }
 
 async function jsonRequest(url, options = {}, timeout = 300000) {
@@ -135,7 +153,7 @@ function showClarification(data) {
         const description = element("span");
         description.append(element("strong", "", candidate.name + (candidate.year ? ` (${candidate.year})` : "")));
         const roles = (candidate.roles || []).map((role) => role === "actor" ? "acteur / actrice" : "réalisateur / réalisatrice");
-        description.append(element("small", "", [...roles, `TMDB ${candidate.id}`].join(" · ")));
+        if (roles.length) description.append(element("small", "", roles.join(" · ")));
         if (candidate.films?.length) description.append(element("small", "", candidate.films.join(" · ")));
         label.append(input, description);
         group.append(label);
@@ -254,72 +272,98 @@ function renderResults(data) {
   $("#results-section").hidden = false;
   $("#strategy-label").textContent = strategyNames[data.strategy] || "Recherche";
   $("#strategy-label").hidden = !data.strategy;
-  const isCount = data.operation === "count" && data.count !== null;
-  $("#results-title").textContent = isCount ? "Comptage exact" : data.results.length ? "Vos résultats" : "Aucun résultat à afficher";
+  const successful = data.status === "ok";
+  const isCount = successful && data.operation === "count" && Number.isInteger(data.count);
+  const answer = data.status === "dependency_error" ? statusMessages.dependency_error : data.answer || "";
+  $("#results-title").textContent = successful
+    ? isCount ? "Comptage exact" : data.results.length ? "Vos résultats" : "Aucun résultat à afficher"
+    : statusTitles[data.status] || "Recherche interrompue";
   const warnings = $("#warnings");
   warnings.replaceChildren();
   for (const warning of data.warnings) warnings.append(element("p", "", warning));
   warnings.hidden = data.warnings.length === 0;
   const proofs = new Map(data.evidence.map((proof) => [proof.id, proof]));
   const proofNumbers = new Map(data.evidence.map((proof, index) => [proof.id, index + 1]));
-  $("#answer-panel").hidden = !data.answer;
-  renderAnswer(data.answer || "", proofNumbers);
+  // A factual answer already appears in the cards or the count. Show prose only
+  // when it adds a synthesis, or explains why the question could not be answered.
+  $("#answer-panel").hidden = !answer || (successful && (data.operation !== "recommend"
+    || data.trace?.generation_mode !== "llm_synthesis"));
+  renderAnswer(answer, proofNumbers);
   const coverage = data.coverage;
-  if (isCount) {
-    $("#coverage").textContent = "Comptage de l’ensemble correspondant dans ce dataset, sans limite d’affichage ni recherche vectorielle.";
+  if (!successful) {
+    $("#coverage").textContent = "";
+  } else if (isCount) {
+    $("#coverage").textContent = "Dans cette collection";
   } else if (data.operation === "list") {
     $("#coverage").textContent = data.results.length
-      ? `${coverage.offset + 1}–${coverage.offset + data.results.length} sur ${coverage.total_candidates} résultat${coverage.total_candidates > 1 ? "s" : ""} vérifié${coverage.total_candidates > 1 ? "s" : ""}.`
+      ? `${coverage.offset + 1}–${coverage.offset + data.results.length} sur ${coverage.total_candidates}`
       : "";
   } else if (data.strategy) {
-    const structural = data.strategy === "HYBRID_GRAPH_FIRST" ? `${coverage.total_candidates} film(s) satisfont les relations. ` : "";
-    $("#coverage").textContent = `${structural}${coverage.scored} film(s) scorés exactement, ${coverage.returned} recommandation(s). ${coverage.without_embedding} film(s) sans embedding. La pertinence thématique n’est pas certifiée.`;
+    $("#coverage").textContent = `${data.results.length} suggestion${data.results.length > 1 ? "s" : ""} · par similarité`;
   } else $("#coverage").textContent = "";
+  $("#technical-coverage").textContent = !successful ? "" : isCount
+    ? "Compte distinct sur l’ensemble des résultats, sans limite d’affichage."
+    : data.operation === "recommend"
+      ? `${coverage.scored} films comparés, ${coverage.without_embedding} sans embedding. La similarité estime la pertinence du thème.`
+      : `${coverage.total_candidates} résultats correspondent aux relations demandées.`;
   const results = $("#results");
   results.replaceChildren();
   if (isCount) {
-    const card = element("article", "result-card");
-    card.append(element("h3", "", new Intl.NumberFormat("fr-FR").format(data.count)));
-    card.append(element("p", "result-type", "Résultats distincts dans le dataset"));
+    const card = element("article", "result-card count-card");
+    card.append(element("h3", "count-value", new Intl.NumberFormat("fr-FR").format(data.count)));
+    card.append(element("p", "result-type", "résultats dans cette collection"));
     const details = element("details", "evidence-details");
     details.append(element("summary", "", "Provenance du comptage"));
     for (const proof of data.evidence) details.append(evidenceNode(proof, proofNumbers.get(proof.id)));
     card.append(details);
     results.append(card);
   }
-  data.results.forEach((result, index) => {
+  data.results.forEach((result) => {
     const card = element("article", "result-card");
     card.dataset.entityId = String(result.id);
     card.dataset.entityType = result.type;
     const header = element("div", "result-header");
     const name = element("div");
     name.append(element("h3", "", result.name), element("p", "result-type", result.type === "Movie" ? "Film" : "Personne"));
-    header.append(element("span", "result-number", String(coverage.offset + index + 1).padStart(2, "0")), name);
+    const symbol = element("span", "result-symbol");
+    symbol.setAttribute("aria-hidden", "true");
+    const icon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    icon.setAttribute("viewBox", "0 0 24 24");
+    const shape = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    shape.setAttribute("d", result.type === "Movie"
+      ? "M4 4h16v16H4zM8 4v16M16 4v16M4 9h4M4 15h4M16 9h4M16 15h4"
+      : "M16 7a4 4 0 1 1-8 0 4 4 0 0 1 8 0ZM5 21v-2a7 7 0 0 1 14 0v2");
+    icon.append(shape);
+    symbol.append(icon);
+    header.append(symbol, name);
     card.append(header);
-    if (result.score !== undefined) {
-      card.append(element("p", "evidence-note", `Similarité : ${Number(result.score).toFixed(4)} · classement, pas probabilité de pertinence.`));
-    }
+    const actions = element("div", "result-actions");
     const details = element("details", "evidence-details");
     details.append(element("summary", "", "Pourquoi ce résultat ?"));
+    if (result.score !== undefined) {
+      details.append(element("p", "evidence-note", `Similarité : ${Number(result.score).toFixed(4)} · classement, pas probabilité de pertinence.`));
+    }
     for (const ref of result.evidence_ids) {
       if (proofs.has(ref)) details.append(evidenceNode(proofs.get(ref), proofNumbers.get(ref)));
     }
-    card.append(details);
-    if (result.type === "Movie") card.append(movieDetails(result));
+    actions.append(details);
+    if (result.type === "Movie") actions.append(movieDetails(result));
+    card.append(actions);
     results.append(card);
   });
-  $("#pagination").hidden = data.operation !== "list" || (!coverage.has_more && coverage.offset === 0);
+  $("#pagination").hidden = !successful || data.operation !== "list" || (!coverage.has_more && coverage.offset === 0);
   const limit = coverage.effective_limit || Number($("#limit").value);
   $("#page-label").textContent = `Page ${Math.floor(coverage.offset / limit) + 1}`;
   $("#trace-label").textContent = data.trace_id ? `Référence de recherche : ${data.trace_id}` : "";
   const message = isCount ? `Comptage terminé : ${data.count}.` : `${data.results.length} résultat${data.results.length > 1 ? "s" : ""} affiché${data.results.length > 1 ? "s" : ""}.`;
-  status(data.status === "ok" ? message : data.answer || statusMessages[data.status], data.status === "dependency_error");
+  status(data.status === "ok" ? message : answer || statusMessages[data.status], data.status === "dependency_error", true);
   $("#results-title").focus();
 }
 
 function render(data) {
   state.response = data;
   $("#welcome").hidden = true;
+  document.body.classList.add("has-results");
   if (data.status === "needs_clarification") {
     state.token = data.clarification_token;
     showClarification(data);
@@ -329,8 +373,10 @@ function render(data) {
 async function search(payload) {
   if (state.busy) return;
   state.busy = true;
+  $("#welcome").hidden = true;
+  document.body.classList.add("has-results");
   controls();
-  status("Recherche en cours… Les relations et les sources sont examinées.");
+  status("Recherche en cours…");
   try {
     const data = await jsonRequest("/questions", {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
@@ -380,7 +426,19 @@ $("#search-form").addEventListener("submit", (event) => {
 });
 
 $("#question").addEventListener("input", resetSearch);
+$("#question").addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+    event.preventDefault();
+    if (!state.busy && state.ready) $("#search-form").requestSubmit();
+  }
+});
 $("#limit").addEventListener("change", resetSearch);
+$("#new-search").addEventListener("click", () => {
+  if (state.busy) return;
+  $("#question").value = "";
+  resetSearch();
+  $("#question").focus();
+});
 document.querySelectorAll(".example-button").forEach((button) => {
   button.addEventListener("click", () => {
     $("#question").value = button.dataset.question;
@@ -398,7 +456,7 @@ $("#clarification-form").addEventListener("submit", (event) => {
 });
 
 function changePage(direction) {
-  if (state.busy || state.response?.operation !== "list") return;
+  if (state.busy || state.response?.status !== "ok" || state.response.operation !== "list") return;
   const previous = state.lastRequest;
   const offset = Math.max(0, state.response.coverage.offset + direction * state.response.coverage.effective_limit);
   const cached = state.pages.get(offset);
